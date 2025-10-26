@@ -31,5 +31,13 @@ Las vistas materializadas (`mv_*`) se crean en `infra/migrations/100_mv_kpis.sql
 - **`pg_cron` disponible**: la migración `110_pg_cron_refresh.sql` agenda refrescos cada 5 minutos (KPIs operativos), 10 minutos (WhatsApp) y 60 minutos (dashboards ejecutivos).
 - **Sin `pg_cron`**: levanta un worker (Node/TS) conectado a la misma base para ejecutar periódicamente `REFRESH MATERIALIZED VIEW CONCURRENTLY ...` con un backoff (ej. usar la cola existente documentada en `ADR` de VM-Workers). Mantén los intervalos sugeridos arriba.
 
-## Particiones de `scan_logs`
-Las migraciones crean particiones para el mes actual y anterior. Programa (vía cron job o worker) la creación de la partición del mes siguiente utilizando el bloque comentado en `010_scan_delivery.sql`. La política de retención sugerida es de 90 a 180 días eliminando particiones completas.
+## Particiones de `scan_logs` y `delivery_logs`
+El worker de backend agenda automáticamente un job mensual (`runLogPartitionMaintenanceJob`) que:
+
+- Verifica que existan particiones para el mes anterior, el actual y el siguiente.
+- Crea de forma anticipada la partición del siguiente mes (por defecto 5 días antes de iniciar el mes, configurable con `SCAN_LOG_PARTITION_LEAD_DAYS`, `SCAN_LOG_PARTITION_HOUR` y `SCAN_LOG_PARTITION_MINUTE`).
+- Elimina particiones completas más antiguas que `SCAN_LOG_RETENTION_DAYS` (valor permitido entre 90 y 180 días; default 180).
+
+El job escribe en logs cada creación/eliminación y emite un mensaje de error (`log_partition_missing` o `log_partition_missing_after_attempt`) cuando detecta particiones faltantes para los meses requeridos.
+
+Para ejecuciones manuales existe el script `backend/scripts/cleanup-log-partitions.js` que reutiliza la misma lógica; acepta la bandera `--dry-run` para validar sin aplicar cambios.

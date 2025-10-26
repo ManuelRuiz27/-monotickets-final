@@ -51,7 +51,24 @@ El worker de backend (`backend/src/jobs/kpi-refresh.js`) ejecuta `runKpiRefreshJ
 
 El intervalo del job se controla con `KPI_REFRESH_INTERVAL_MINUTES` (por defecto 30 minutos) y puede forzarse con la bandera `--force` al iniciar el worker.
 
-## 4. Limpieza y resiembra
+## 4. Mantenimiento de particiones en `scan_logs` y `delivery_logs`
+
+El worker (`backend/src/worker.js`) ejecuta mensualmente `runLogPartitionMaintenanceJob`, encargado de:
+
+- Garantizar particiones para el mes anterior, el actual y el siguiente; ante una ausencia emite un log `log_partition_missing`.
+- Crear automáticamente la partición del mes siguiente unos días antes de iniciar (por defecto 5 días antes, configurable vía `SCAN_LOG_PARTITION_LEAD_DAYS`, `SCAN_LOG_PARTITION_HOUR` y `SCAN_LOG_PARTITION_MINUTE`).
+- Eliminar particiones completas más antiguas que `SCAN_LOG_RETENTION_DAYS` (valor entre 90 y 180 días, default 180).
+
+Para entornos donde se necesite ejecutar la limpieza manualmente (staging/producción) existe el script:
+
+```bash
+cd backend
+SCAN_LOG_RETENTION_DAYS=120 npm run cleanup:log-partitions
+```
+
+Incluye la bandera `--dry-run` (`npm run cleanup:log-partitions -- --dry-run`) para revisar qué acciones se tomarían sin aplicarlas.
+
+## 5. Limpieza y resiembra
 
 Para regenerar los datos simplemente elimina el volumen `pg_data` y repite los pasos:
 
