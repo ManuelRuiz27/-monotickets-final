@@ -267,17 +267,37 @@ confirmed_guests AS (
     JOIN event_enriched e ON e.id = g.event_id
     WHERE g.status IN ('confirmed', 'scanned')
 ),
+wa_session_seed AS (
+    INSERT INTO wa_sessions (phone, started_at, expires_at, metadata, last_message_at)
+    SELECT DISTINCT
+        regexp_replace(g.phone, '\\D', '', 'g') AS phone,
+        now() - interval '2 hours' + (g.guest_seq * interval '10 minutes') AS started_at,
+        now() + interval '20 hours' - (g.guest_seq * interval '5 minutes') AS expires_at,
+        jsonb_build_object('seed', true, 'guest_id', g.id, 'event_id', g.event_id) AS metadata,
+        now() - interval '30 minutes' AS last_message_at
+    FROM guest_enriched g
+    WHERE g.status IN ('confirmed', 'pending')
+    ON CONFLICT (phone) DO UPDATE
+      SET started_at = EXCLUDED.started_at,
+          expires_at = EXCLUDED.expires_at,
+          metadata = jsonb_strip_nulls(wa_sessions.metadata || EXCLUDED.metadata),
+          last_message_at = EXCLUDED.last_message_at,
+          updated_at = now()
+    RETURNING id, phone
+),
 delivery_plan AS (
     SELECT
         e.organizer_id,
         g.event_id,
         g.id AS guest_id,
+        regexp_replace(g.phone, '\\D', '', 'g') AS normalized_phone,
         CASE WHEN (g.guest_seq + attempt.attempt) % 2 = 0 THEN 'whatsapp' ELSE 'email' END AS channel,
         CASE
             WHEN (g.guest_seq + attempt.attempt) % 3 = 0 THEN 'reminder_template'
             WHEN (g.guest_seq + attempt.attempt) % 2 = 0 THEN 'session_followup'
             ELSE 'initial_invite'
         END AS template,
+        attempt.attempt AS attempt,
         CASE
             WHEN (g.guest_seq + attempt.attempt) % 7 = 0 THEN 'failed'
             WHEN (g.guest_seq + attempt.attempt) % 5 = 0 THEN 'queued'
@@ -295,19 +315,29 @@ delivery_plan AS (
     JOIN LATERAL generate_series(1, 4) AS attempt(attempt) ON TRUE
 ),
 delivery_insert AS (
-    INSERT INTO delivery_logs (organizer_id, event_id, guest_id, channel, template, status, provider_ref, error, created_at, updated_at)
+    INSERT INTO delivery_logs (organizer_id, event_id, guest_id, channel, template, status, is_free, session_id, provider_ref, metadata, error, created_at, updated_at)
     SELECT
-        organizer_id,
-        event_id,
-        guest_id,
-        channel,
-        template,
-        status,
-        provider_ref,
-        error,
-        created_at,
-        CASE WHEN status = 'queued' THEN created_at ELSE created_at + interval '15 minutes' END
-    FROM delivery_plan
+        dp.organizer_id,
+        dp.event_id,
+        dp.guest_id,
+        dp.channel,
+        dp.template,
+        dp.status,
+        CASE
+            WHEN dp.channel = 'whatsapp'
+                 AND ws.id IS NOT NULL
+                 AND dp.created_at >= now() - interval '24 hours'
+            THEN true
+            ELSE false
+        END AS is_free,
+        ws.id AS session_id,
+        dp.provider_ref,
+        jsonb_build_object('seed', true, 'attempt', dp.attempt),
+        dp.error,
+        dp.created_at,
+        CASE WHEN dp.status = 'queued' THEN dp.created_at ELSE dp.created_at + interval '15 minutes' END
+    FROM delivery_plan dp
+    LEFT JOIN wa_session_seed ws ON ws.phone = dp.normalized_phone
     RETURNING *
 ),
 ledger_blueprint AS (

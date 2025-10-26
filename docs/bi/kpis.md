@@ -14,9 +14,8 @@ Las vistas materializadas (`mv_*`) se crean en `infra/migrations/100_mv_kpis.sql
 
 ## 3. Ratio de sesiones gratuitas de WhatsApp (`mv_wa_free_ratio_daily`)
 - **Definición**: `sesiones_gratuitas / total_mensajes_whatsapp` por `event_id` y día (`delivery_logs.created_at`).
-- **Inputs**: `delivery_logs` filtrado por `channel='whatsapp'` y `status IN ('sent','delivered')`.
-- **Heurística temporal**: se asume gratuita toda entrega ocurrida dentro de las 24h posteriores al primer mensaje de WhatsApp para ese invitado. El campo `assumption='heuristic_24h_window'` recuerda que debe sustituirse cuando integremos `wa_sessions` + `GET /wa/session/:phone`.
-- **TODO**: sustituir la heurística por la tabla real `wa_sessions` y etiquetar `delivery_logs` con `is_free` desde backend.
+- **Inputs**: `delivery_logs` filtrado por `channel='whatsapp'` y `status IN ('sent','delivered')`, usando directamente la columna `is_free`.
+- **Notas**: `session_id` enlaza cada intento con `wa_sessions` (ventana activa y metadata del último mensaje). Permite validar desde BI si un mensaje cobró o no según la sesión abierta.
 
 ## 4. Mix de eventos 90 días (`mv_event_mix_90d`)
 - **Definición**: conteo de eventos y de invitados por tipo (`standard|premium`) y día (`date_trunc('day', events.starts_at)`) en una ventana rodante de 90 días.

@@ -1,5 +1,6 @@
 import { query } from './index.js';
 import { createLogger } from '../logging.js';
+import { normalizeWhatsappPhone } from '../lib/phone.js';
 
 async function ensureExtensions(logger) {
   await query('CREATE EXTENSION IF NOT EXISTS "pgcrypto"');
@@ -85,14 +86,38 @@ async function ensureDeliveryInfrastructure(logger) {
   await query('CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_requests_correlation ON delivery_requests(correlation_id)');
   await query('CREATE INDEX IF NOT EXISTS idx_delivery_requests_guest_template ON delivery_requests(event_id, guest_id, template, created_at DESC)');
 
+  await query(`
+    CREATE TABLE IF NOT EXISTS wa_sessions (
+      id bigserial PRIMARY KEY,
+      phone text NOT NULL UNIQUE,
+      started_at timestamptz NOT NULL,
+      expires_at timestamptz NOT NULL,
+      last_message_at timestamptz,
+      metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )
+  `);
+  await query('ALTER TABLE wa_sessions ADD COLUMN IF NOT EXISTS last_message_at timestamptz');
+  await query("ALTER TABLE wa_sessions ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}'::jsonb");
+  await query('ALTER TABLE wa_sessions ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now()');
+  await query('ALTER TABLE wa_sessions ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()');
+  await query('CREATE INDEX IF NOT EXISTS idx_wa_sessions_expires_at ON wa_sessions(expires_at DESC)');
+
   await convertLegacyDeliveryLogs(logger);
   await ensureDeliveryPartitions(logger);
+
+  await query('ALTER TABLE delivery_logs ADD COLUMN IF NOT EXISTS is_free boolean NOT NULL DEFAULT false');
+  await query('ALTER TABLE delivery_logs ALTER COLUMN is_free SET DEFAULT false');
+  await query('ALTER TABLE delivery_logs ADD COLUMN IF NOT EXISTS session_id bigint REFERENCES wa_sessions(id)');
 
   await query(`
     CREATE INDEX IF NOT EXISTS idx_delivery_logs_request_attempt
       ON delivery_logs(request_id, attempt DESC)
   `);
   await query('CREATE INDEX IF NOT EXISTS idx_delivery_logs_id ON delivery_logs(id)');
+  await query('CREATE INDEX IF NOT EXISTS idx_delivery_logs_session_id ON delivery_logs(session_id)');
+  await query('CREATE INDEX IF NOT EXISTS idx_delivery_logs_is_free ON delivery_logs(is_free)');
 
   await query(`
     CREATE TABLE IF NOT EXISTS delivery_provider_refs (
@@ -188,6 +213,8 @@ async function convertLegacyDeliveryLogs(logger) {
       provider_ref text,
       error jsonb,
       metadata jsonb,
+      is_free boolean NOT NULL DEFAULT false,
+      session_id bigint REFERENCES wa_sessions(id),
       queued_at timestamptz NOT NULL DEFAULT now(),
       started_at timestamptz,
       completed_at timestamptz,
@@ -444,6 +471,39 @@ async function seedBaselineData(logger) {
     return acc;
   }, {});
 
+  const seedSessions = {};
+  const sessionSeeds = [
+    { key: 'confirmed', phone: guestsByStatus.confirmed?.phone, label: 'confirmed_guest' },
+    { key: 'pending', phone: guestsByStatus.pending?.phone, label: 'pending_guest' },
+  ];
+  for (const target of sessionSeeds) {
+    const normalizedPhone = normalizeWhatsappPhone(target.phone);
+    if (!normalizedPhone) {
+      continue;
+    }
+    const result = await query(
+      `
+        INSERT INTO wa_sessions (phone, started_at, expires_at, metadata, last_message_at)
+        VALUES (
+          $1,
+          now() - interval '30 minutes',
+          now() + interval '23 hours',
+          jsonb_build_object('seed', true, 'label', $2),
+          now()
+        )
+        ON CONFLICT (phone) DO UPDATE
+          SET started_at = EXCLUDED.started_at,
+              expires_at = EXCLUDED.expires_at,
+              metadata = jsonb_strip_nulls(wa_sessions.metadata || EXCLUDED.metadata),
+              last_message_at = now(),
+              updated_at = now()
+        RETURNING id
+      `,
+      [normalizedPhone, target.label],
+    );
+    seedSessions[target.key] = result.rows[0]?.id || null;
+  }
+
   await query(
     `
       INSERT INTO invites (event_id, guest_id, code, links)
@@ -522,6 +582,8 @@ async function seedBaselineData(logger) {
         provider_ref,
         error,
         metadata,
+        is_free,
+        session_id,
         queued_at,
         started_at,
         completed_at,
@@ -534,13 +596,15 @@ async function seedBaselineData(logger) {
         'seed-provider-ref',
         NULL,
         jsonb_build_object('seed', true),
+        true,
+        $2,
         now() - interval '2 minutes',
         now() - interval '90 seconds',
         now() - interval '1 minute',
         now() - interval '2 minutes'
       )
     `,
-    [requestId],
+    [requestId, seedSessions.confirmed || null],
   );
 
   logger({ level: 'info', message: 'db_seed_completed', event_id: eventId });

@@ -53,6 +53,8 @@ test.describe('@wa webhook acceptance window', () => {
         { timeoutMs: 10_000, intervalMs: 1_000 },
       );
       expect(session.status.toLowerCase()).toBe('open');
+      expect(session.sessionId || session.session_id).toBeTruthy();
+      expect(session.expiresAt || session.expires_at).toBeTruthy();
     } catch (error) {
       test.info().annotations.push({
         type: 'wa-session-poll',

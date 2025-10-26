@@ -57,6 +57,15 @@ test.describe('@wa @delivery @window WhatsApp session handling', () => {
       : logs;
     expect(logEntry).toBeTruthy();
     expect((logEntry.status || logEntry.state || '').toLowerCase()).toMatch(/accept|sent|delivered/);
+    const isFreeFlag =
+      typeof logEntry.isFree === 'boolean'
+        ? logEntry.isFree
+        : typeof logEntry.is_free === 'boolean'
+          ? logEntry.is_free
+          : undefined;
+    expect(isFreeFlag).toBe(true);
+    const sessionFromLog = logEntry.sessionId || logEntry.session_id;
+    expect(sessionFromLog).toBeTruthy();
   });
 
   test('@wa @delivery @window should require template when the session is expired', async ({ request }) => {

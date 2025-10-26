@@ -15,7 +15,7 @@ Los endpoints legados (`POST /events/:eventId/guests/:guestId/send`, `POST /wa/w
 ## Colas y workers
 
 - `wa_outbound` (configurable con `DELIVERY_QUEUE_NAME` o `WA_OUTBOUND_QUEUE_NAME`): recibe jobs `send` con los datos del invitado y del template. Implementa la secuencia de reintentos `1s → 5s → 20s → 60s` con un máximo de 5 intentos antes de pasar a la DLQ.
-- `wa_inbound`: procesa los webhooks de 360dialog, deduplica por `message.id` y actualiza sesiones de 24 h. Utiliza la misma secuencia de reintentos para asegurar idempotencia en los inbound events.
+- `wa_inbound`: procesa los webhooks de 360dialog, deduplica por `message.id` y actualiza sesiones de 24 h tanto en Redis como en PostgreSQL (`wa_sessions`). Utiliza la misma secuencia de reintentos para asegurar idempotencia en los inbound events.
 
 Ambas colas registran cada transición en `delivery_logs` (`queued → processing → sent|delivered|failed`). Los fallos definitivos se envían a `delivery_failed` para análisis manual.
 
@@ -25,17 +25,21 @@ Ambas colas registran cada transición en `delivery_logs` (`queued → processin
 - **Inbound**: cada mensaje entrante de WhatsApp verifica `provider_ref` y `message.id`. Los duplicados se descartan y se conserva la primera transición registrada.
 - **Estados**: las respuestas de `GET /deliver/:id/status` se guardan en Redis con TTL de 30–60 s (`DELIVERY_STATUS_CACHE_TTL_SECONDS`). Cada intento exitoso/erróneo invalida la caché para mantener los dashboards sincronizados.
 
-## delivery_logs
+## delivery_logs y wa_sessions
 
-Todos los cambios de estado (queued, sent, delivered, failed) se guardan en `delivery_logs`. La tabla está particionada mensualmente y hash por `event_id` para mantener consultas rápidas. Las columnas clave son:
+Todos los cambios de estado (queued, sent, delivered, failed) se guardan en `delivery_logs`. La tabla está particionada mensualmente por `created_at` para mantener consultas rápidas y ahora enlaza con las sesiones activas:
 
 - `channel`, `template`, `status`.
+- `is_free` indica si el mensaje salió dentro de la ventana gratuita de 24 h (solo aplica para WhatsApp).
+- `session_id` referencia a `wa_sessions.id` cuando hay sesión abierta.
 - `provider_ref` (referencia del proveedor, usada para idempotencia y tracking).
-- `error` (JSON con detalle del fallo, cuando aplica).
+- `metadata` y `error` (JSON con detalle del intento y el fallo, cuando aplica).
+
+Las sesiones vivas se registran en `wa_sessions` con `started_at`, `expires_at`, `metadata` y `last_message_at`. Cada webhook renueva la ventana y marca la sesión como activa también en Redis (`wa:session:{phone}`) para respuestas rápidas.
 
 ## Estado de invitados y regla de 24 h
 
-Cuando se recibe un mensaje válido dentro de la ventana de 24 h (`WA_SESSION_TTL_SECONDS`) se registra la sesión en Redis (`wa:session:{phone}`). Si el cuerpo contiene afirmaciones de confirmación (por ejemplo `confirm`), se actualiza al invitado de `pending` → `confirmed` y se limpia la caché `landing:*`. Posteriormente, los jobs de envío pueden cambiar a `sent/delivered` y las vistas del dashboard reflejan el cambio.
+Cuando se recibe un mensaje válido dentro de la ventana de 24 h (`WA_SESSION_TTL_SECONDS`) se registra/renueva la sesión tanto en Redis (`wa:session:{phone}`) como en `wa_sessions`. Si el cuerpo contiene afirmaciones de confirmación (por ejemplo “confirmo”, “sí voy”, “asistir”), se actualiza al invitado de `pending` → `confirmed`, se anota el `sessionId` en `confirmation_payload` y se limpia la caché `landing:*`. Posteriormente, los jobs de envío marcan `is_free=true` cuando detectan una sesión abierta y las vistas del dashboard reflejan el cambio.
 
 ## Variables de entorno relevantes
 

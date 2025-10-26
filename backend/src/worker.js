@@ -6,6 +6,7 @@ import { createSimpleWorker, SimpleQueueEvents, SimpleQueue } from './queues/sim
 import { ensureRedis } from './redis/client.js';
 import { query } from './db/index.js';
 import { CircuitBreaker } from './lib/circuit-breaker.js';
+import { normalizeWhatsappPhone } from './lib/phone.js';
 import { runLandingTtlJob } from './jobs/landing-ttl.js';
 import { runKpiRefreshJob } from './jobs/kpi-refresh.js';
 import { invalidateDeliveryStatusCache } from './modules/delivery-status-cache.js';
@@ -59,7 +60,18 @@ async function main() {
 
   scheduleLandingJob();
   scheduleKpiRefreshJob();
-  scheduleQueueMetrics();
+
+  const metricsDisabled =
+    String(env.QUEUE_METRICS_DISABLED || '').toLowerCase() === 'true' || env.NODE_ENV === 'test';
+  if (metricsDisabled) {
+    logger({
+      level: 'info',
+      message: 'queue_metrics_disabled',
+      reason: env.NODE_ENV === 'test' ? 'node_env_test' : 'flagged',
+    });
+  } else {
+    scheduleQueueMetrics();
+  }
 }
 
 async function bootstrapOutboundWorker({ queueName, channel }) {
@@ -183,6 +195,8 @@ async function processDeliveryJob(job, options = {}) {
   const attempt = await beginDeliveryAttempt({
     requestId,
     metadata: data.metadata,
+    isFree: Boolean(data.isFree),
+    sessionId: data.sessionId || null,
   });
   if (!attempt) {
     logger({ level: 'error', message: 'delivery_attempt_not_created', request_id: requestId, job_id: job.id });
@@ -337,18 +351,54 @@ async function processWaWebhook(data) {
     return;
   }
 
+  const inboundMessages = Array.isArray(payload.messages) ? payload.messages : [];
+  const normalizedContact = normalizeWhatsappPhone(contact);
+  const sessionPhone = normalizedContact || contact;
+  const primaryMessage = inboundMessages.find((message) => typeof message?.id === 'string');
+  const primaryMessageId = primaryMessage?.id || null;
   const expiresAt = new Date(Date.now() + Number(env.WA_SESSION_TTL_SECONDS || 24 * 3600) * 1000);
-  await query(
-    `INSERT INTO wa_sessions (phone, opened_at, expires_at)
-     VALUES ($1, now(), $2)
-     ON CONFLICT (phone) DO UPDATE SET opened_at = EXCLUDED.opened_at, expires_at = EXCLUDED.expires_at`,
-    [contact, expiresAt],
+  const sessionResult = await query(
+    `
+      INSERT INTO wa_sessions (phone, started_at, expires_at, metadata, last_message_at, updated_at)
+      VALUES (
+        $1,
+        now(),
+        $2,
+        jsonb_strip_nulls(jsonb_build_object(
+          'last_webhook_id', $3,
+          'last_message_id', $4,
+          'raw_phone', $5
+        )),
+        now(),
+        now()
+      )
+      ON CONFLICT (phone) DO UPDATE
+        SET started_at = CASE
+              WHEN wa_sessions.expires_at > now() THEN wa_sessions.started_at
+              ELSE EXCLUDED.started_at
+            END,
+            expires_at = EXCLUDED.expires_at,
+            metadata = jsonb_strip_nulls(wa_sessions.metadata || EXCLUDED.metadata),
+            last_message_at = now(),
+            updated_at = now()
+      RETURNING id, started_at, expires_at
+    `,
+    [sessionPhone, expiresAt, data.webhookId, primaryMessageId, contact],
   );
 
-  const redis = await ensureRedis({ name: 'wa-sessions', env });
-  await redis.set(`wa:session:${contact}`, 'open', 'EX', Number(env.WA_SESSION_TTL_SECONDS || 24 * 3600));
+  const sessionRow = sessionResult.rows[0] || null;
+  const sessionId = sessionRow?.id || null;
 
-  const inboundMessages = Array.isArray(payload.messages) ? payload.messages : [];
+  const redis = await ensureRedis({ name: 'wa-sessions', env });
+  const ttlSeconds = Number(env.WA_SESSION_TTL_SECONDS || 24 * 3600);
+  const cacheKeys = new Set([sessionPhone]);
+  if (contact && contact !== sessionPhone) {
+    cacheKeys.add(contact);
+  }
+  for (const key of cacheKeys) {
+    await redis.set(`wa:session:${key}`, 'open', 'EX', ttlSeconds);
+  }
+
   for (const message of inboundMessages) {
     const messageId = message?.id || message?.message_id || null;
     if (messageId) {
@@ -358,7 +408,14 @@ async function processWaWebhook(data) {
         continue;
       }
     }
-    await handleInboundMessage({ message, contact, webhook: data, env });
+    await handleInboundMessage({
+      message,
+      contact: sessionPhone,
+      rawContact: contact,
+      webhook: data,
+      env,
+      sessionId,
+    });
   }
 
   const statusUpdates = Array.isArray(payload.statuses) ? payload.statuses : [];
@@ -455,7 +512,16 @@ async function sendWhatsAppMessage({ guest, template, payload }) {
   const providerRef = payloadResponse.messages?.[0]?.id || `wa-${randomUUID()}`;
 
   const redis = await ensureRedis({ name: 'wa-sessions', env });
-  await redis.set(`wa:session:${guest.phone}`, 'open', 'EX', Number(env.WA_SESSION_TTL_SECONDS || 24 * 3600));
+  const normalizedPhone = normalizeWhatsappPhone(guest.phone);
+  const sessionKeys = new Set([normalizedPhone || guest.phone]);
+  if (guest.phone && normalizedPhone && normalizedPhone !== guest.phone) {
+    sessionKeys.add(guest.phone);
+  }
+  for (const key of sessionKeys) {
+    if (key) {
+      await redis.set(`wa:session:${key}`, 'open', 'EX', Number(env.WA_SESSION_TTL_SECONDS || 24 * 3600));
+    }
+  }
 
   return { providerRef, status: 'sent' };
 }
@@ -502,7 +568,7 @@ async function sendEmailMessage({ guest, template, payload }) {
   return { providerRef: payloadResponse.id || `email-${randomUUID()}`, status: 'sent' };
 }
 
-async function beginDeliveryAttempt({ requestId, metadata }) {
+async function beginDeliveryAttempt({ requestId, metadata, isFree = false, sessionId = null }) {
   const requestUpdate = await query(
     `
       UPDATE delivery_requests
@@ -525,14 +591,16 @@ async function beginDeliveryAttempt({ requestId, metadata }) {
         attempt,
         status,
         metadata,
+        is_free,
+        session_id,
         queued_at,
         started_at,
         created_at
       )
-      VALUES ($1, $2, 'processing', $3::jsonb, now(), now(), now())
+      VALUES ($1, $2, 'processing', $3::jsonb, $4, $5, now(), now(), now())
       RETURNING id
     `,
-    [requestId, attemptNumber, metadata ? JSON.stringify(metadata) : null],
+    [requestId, attemptNumber, metadata ? JSON.stringify(metadata) : null, isFree, sessionId],
   );
   return { attemptId: result.rows[0].id, attemptNumber };
 }
@@ -750,24 +818,33 @@ async function handleMockWebhook(payload = {}) {
   );
 }
 
-async function handleInboundMessage({ message = {}, contact, webhook, env }) {
+async function handleInboundMessage({ message = {}, contact, rawContact, webhook, env, sessionId }) {
   const text = extractMessageText(message);
-  if (!text) {
+  if (!isConfirmationMessage(text)) {
     return;
   }
 
-  if (!/confirm/i.test(text)) {
-    return;
+  const searchPhones = [contact];
+  if (rawContact && rawContact !== contact) {
+    searchPhones.push(rawContact);
   }
 
-  const guestResult = await query(
-    `SELECT id, status, event_id
-       FROM guests
-      WHERE phone = $1
-      ORDER BY created_at DESC
-      LIMIT 1`,
-    [contact],
-  );
+  let guestResult = { rowCount: 0 };
+  let matchedPhone = contact;
+  for (const phone of searchPhones) {
+    guestResult = await query(
+      `SELECT id, status, event_id
+         FROM guests
+        WHERE phone = $1
+        ORDER BY created_at DESC
+        LIMIT 1`,
+      [phone],
+    );
+    if (guestResult.rowCount > 0) {
+      matchedPhone = phone;
+      break;
+    }
+  }
 
   if (guestResult.rowCount === 0) {
     logger({ level: 'info', message: 'wa_inbound_guest_not_found', phone: contact, webhook_id: webhook.webhookId });
@@ -779,12 +856,36 @@ async function handleInboundMessage({ message = {}, contact, webhook, env }) {
     await query(
       `UPDATE guests
           SET status = 'confirmed',
-              confirmation_payload = jsonb_build_object('source', 'whatsapp', 'webhookId', $2, 'messageId', $3, 'receivedAt', $4)
+              confirmation_payload = jsonb_strip_nulls(jsonb_build_object(
+                'source', 'whatsapp',
+                'webhookId', $2,
+                'messageId', $3,
+                'receivedAt', $4,
+                'sessionId', $5,
+                'phone', $6,
+                'rawPhone', $7,
+                'messageText', $8
+              ))
         WHERE id = $1`,
-      [guest.id, webhook.webhookId, message.id || null, webhook.receivedAt || new Date().toISOString()],
+      [
+        guest.id,
+        webhook.webhookId,
+        message.id || message.message_id || null,
+        webhook.receivedAt || new Date().toISOString(),
+        sessionId,
+        matchedPhone,
+        rawContact || null,
+        text,
+      ],
     );
     await invalidateLandingCache(guest.event_id, env);
-    logger({ level: 'info', message: 'guest_confirmed_from_wa', guest_id: guest.id, event_id: guest.event_id });
+    logger({
+      level: 'info',
+      message: 'guest_confirmed_from_wa',
+      guest_id: guest.id,
+      event_id: guest.event_id,
+      session_id: sessionId || undefined,
+    });
   }
 }
 
@@ -796,6 +897,33 @@ function extractMessageText(message = {}) {
     return message.messages[0].text;
   }
   return '';
+}
+
+const CONFIRMATION_PATTERNS = [
+  /\bconfirm/,
+  /\bsi\b/,
+  /\basist/,
+  /\bvoy\b/,
+  /\balli\b/,
+  /\bahi\b/,
+  /\bpresente\b/,
+  /\bcuenten? conmigo\b/,
+  /\bestare\b/,
+];
+
+function normalizeMessageText(text = '') {
+  return String(text)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function isConfirmationMessage(text = '') {
+  const normalized = normalizeMessageText(text);
+  if (!normalized) {
+    return false;
+  }
+  return CONFIRMATION_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
 function normalizeStripeStatus(status) {

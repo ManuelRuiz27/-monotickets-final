@@ -7,7 +7,7 @@ Las tarjetas demo permiten armar dos tableros base: uno operativo para organizad
 - **KPI tiles**
   - Confirmación hoy (`mv_confirmation_rate_daily` filtrado a `day = current_date`).
   - Show-up hoy (`mv_show_up_rate_daily` filtrado al día actual).
-  - Ratio WA gratuito 24h (`mv_wa_free_ratio_daily`, `assumption='heuristic_24h_window'`).
+  - Ratio WA gratuito 24h (`mv_wa_free_ratio_daily`).
 - **Series / gráficos**
   - Confirmación últimos 7 días (línea sobre `mv_confirmation_rate_daily`).
   - Escaneos por hora el día del evento (tabla/heatmap con `scan_logs` particionadas).
@@ -26,5 +26,5 @@ Las tarjetas demo permiten armar dos tableros base: uno operativo para organizad
   - Evolución ratio WA gratuito (línea de `mv_wa_free_ratio_daily`).
   - Aging de deuda: buckets por antigüedad usando `payments.last_payment_at` y `mv_organizer_debt`.
 - **Notas**
-  - Incluye descripción sobre la heurística WA y el plan para integrar `wa_sessions`.
+  - Documenta que `is_free` proviene de la sesión activa (`wa_sessions`) y enlaza con `delivery_logs.session_id` para trazabilidad.
   - Resalta las equivalencias de tickets (`ticket_ledger.equiv_json`) para alinear precios estándar vs premium.
