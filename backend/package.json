@@ -9,7 +9,8 @@
     "start:worker": "node src/worker.js",
     "lint": "node scripts/lint-placeholder.js",
     "test": "node --test",
-    "test:ci": "node --test"
+    "test:ci": "node --test",
+    "cleanup:log-partitions": "node scripts/cleanup-log-partitions.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

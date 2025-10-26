@@ -9,6 +9,7 @@ import { CircuitBreaker } from './lib/circuit-breaker.js';
 import { normalizeWhatsappPhone } from './lib/phone.js';
 import { runLandingTtlJob } from './jobs/landing-ttl.js';
 import { runKpiRefreshJob } from './jobs/kpi-refresh.js';
+import { runLogPartitionMaintenanceJob, normalizeLeadDays as normalizePartitionLeadDays } from './jobs/log-partition-maintenance.js';
 import { invalidateDeliveryStatusCache } from './modules/delivery-status-cache.js';
 import {
   buildTemplateVars,
@@ -60,6 +61,7 @@ async function main() {
 
   scheduleLandingJob();
   scheduleKpiRefreshJob();
+  scheduleLogPartitionMaintenanceJob();
 
   const metricsDisabled =
     String(env.QUEUE_METRICS_DISABLED || '').toLowerCase() === 'true' || env.NODE_ENV === 'test';
@@ -1016,6 +1018,54 @@ function scheduleKpiRefreshJob() {
     execute();
     setInterval(execute, intervalMinutes * 60 * 1000).unref();
   }, initialDelayMs).unref();
+}
+
+function scheduleLogPartitionMaintenanceJob() {
+  const args = new Set(process.argv.slice(2));
+  const dryRun = args.has('--dry-run');
+  const force = args.has('--force');
+  const leadDays = normalizePartitionLeadDays(env.SCAN_LOG_PARTITION_LEAD_DAYS);
+  const hour = Number(env.SCAN_LOG_PARTITION_HOUR ?? 2);
+  const minute = Number(env.SCAN_LOG_PARTITION_MINUTE ?? 30);
+
+  const execute = async () => {
+    try {
+      await runLogPartitionMaintenanceJob({ env, logger, dryRun });
+    } catch (error) {
+      logger({ level: 'error', message: 'log_partition_job_failed', error: error.message });
+    }
+  };
+
+  const scheduleNext = () => {
+    const now = new Date();
+    const nextRunAt = computeNextDailyRun({ now, hour, minute });
+    const delay = Math.max(0, nextRunAt.getTime() - now.getTime());
+    logger({
+      level: 'info',
+      message: 'log_partition_job_scheduled',
+      run_at: nextRunAt.toISOString(),
+      lead_days: leadDays,
+    });
+    setTimeout(async () => {
+      await execute();
+      scheduleNext();
+    }, delay).unref();
+  };
+
+  if (force || !args.has('--no-run-on-start')) {
+    execute();
+  }
+
+  scheduleNext();
+}
+
+function computeNextDailyRun({ now, hour, minute }) {
+  const next = new Date(now);
+  next.setUTCHours(hour, minute, 0, 0);
+  if (next <= now) {
+    next.setUTCDate(next.getUTCDate() + 1);
+  }
+  return next;
 }
 
 function scheduleQueueMetrics() {
