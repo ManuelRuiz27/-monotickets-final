@@ -37,6 +37,15 @@ test.describe('@delivery whatsapp delivery flows', () => {
       : logs;
     expect(logEntry).toBeTruthy();
     expect((logEntry.status || logEntry.state || '').toLowerCase()).toMatch(/accepted|sent/);
+    const isFreeFlag =
+      typeof logEntry.isFree === 'boolean'
+        ? logEntry.isFree
+        : typeof logEntry.is_free === 'boolean'
+          ? logEntry.is_free
+          : undefined;
+    expect(isFreeFlag).toBe(true);
+    const sessionFromLog = logEntry.sessionId || logEntry.session_id;
+    expect(sessionFromLog).toBeTruthy();
   });
 
   test('@wa should reject deliveries outside the 24h window', async ({ request }) => {

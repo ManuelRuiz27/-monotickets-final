@@ -9,8 +9,7 @@ SELECT e.id AS event_id,
        ROUND(100.0 * COUNT(*) FILTER (WHERE g.status = 'confirmed') / NULLIF(COUNT(*), 0), 2) AS confirmation_rate
 FROM guests g
 JOIN events e ON e.id = g.event_id
-GROUP BY e.id, day
-WITH NO DATA;
+GROUP BY e.id, day;
 
 DROP MATERIALIZED VIEW IF EXISTS mv_show_up_rate_daily;
 CREATE MATERIALIZED VIEW mv_show_up_rate_daily AS
@@ -26,8 +25,7 @@ SELECT e.id AS event_id,
 FROM scan_logs s
 JOIN guests g ON s.guest_id = g.id
 JOIN events e ON e.id = g.event_id
-GROUP BY e.id, day
-WITH NO DATA;
+GROUP BY e.id, day;
 
 DROP MATERIALIZED VIEW IF EXISTS mv_wa_free_ratio_daily;
 CREATE MATERIALIZED VIEW mv_wa_free_ratio_daily AS
@@ -42,8 +40,7 @@ SELECT e.id AS event_id,
        ) AS wa_free_ratio
 FROM delivery_logs d
 JOIN events e ON e.id = d.event_id
-GROUP BY e.id, day
-WITH NO DATA;
+GROUP BY e.id, day;
 
 DROP MATERIALIZED VIEW IF EXISTS mv_event_mix_90d;
 CREATE MATERIALIZED VIEW mv_event_mix_90d AS
@@ -54,8 +51,7 @@ SELECT date_trunc('day', e.created_at) AS day,
 FROM events e
 LEFT JOIN guests g ON g.event_id = e.id
 WHERE e.created_at >= now() - interval '90 days'
-GROUP BY day, e.type
-WITH NO DATA;
+GROUP BY day, e.type;
 
 DROP MATERIALIZED VIEW IF EXISTS mv_organizer_debt;
 CREATE MATERIALIZED VIEW mv_organizer_debt AS
@@ -81,8 +77,7 @@ SELECT o.id AS organizer_id,
        pt.last_payment_at
 FROM organizers o
 LEFT JOIN ledger_totals lt ON lt.organizer_id = o.id
-LEFT JOIN payment_totals pt ON pt.organizer_id = o.id
-WITH NO DATA;
+LEFT JOIN payment_totals pt ON pt.organizer_id = o.id;
 
 CREATE UNIQUE INDEX IF NOT EXISTS mv_confirmation_rate_daily_idx
     ON mv_confirmation_rate_daily (event_id, day);
@@ -95,10 +90,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS mv_event_mix_90d_idx
 CREATE UNIQUE INDEX IF NOT EXISTS mv_organizer_debt_idx
     ON mv_organizer_debt (organizer_id);
 
-REFRESH MATERIALIZED VIEW mv_confirmation_rate_daily;
-REFRESH MATERIALIZED VIEW mv_show_up_rate_daily;
-REFRESH MATERIALIZED VIEW mv_wa_free_ratio_daily;
-REFRESH MATERIALIZED VIEW mv_event_mix_90d;
-REFRESH MATERIALIZED VIEW mv_organizer_debt;
-
 COMMIT;
+
+REFRESH MATERIALIZED VIEW CONCURRENTLY mv_confirmation_rate_daily;
+REFRESH MATERIALIZED VIEW CONCURRENTLY mv_show_up_rate_daily;
+REFRESH MATERIALIZED VIEW CONCURRENTLY mv_wa_free_ratio_daily;
+REFRESH MATERIALIZED VIEW CONCURRENTLY mv_event_mix_90d;
+REFRESH MATERIALIZED VIEW CONCURRENTLY mv_organizer_debt;

@@ -35,8 +35,8 @@ Metabase es el contenedor de BI ligero del stack de Monotickets. Permite explora
 
 - **Foco diario**: aplica filtros rápidos (hoy, últimos 7 días) para validar confirmaciones y show-up recientes.
 - **Drill-down**: enlaza tablas detalladas que permitan auditar invitados, invitaciones y delivery logs directamente desde los indicadores.
-- **WhatsApp gratuito**: mientras llega el modelo de `wa_sessions`, usa el campo `assumption` de `mv_wa_free_ratio_daily` para aclarar la heurística de 24h.
-- **Rendimiento**: las vistas materializadas (`mv_*`) soportan `REFRESH MATERIALIZED VIEW CONCURRENTLY`; evita consultas pesadas directamente sobre `scan_logs` históricos.
+- **WhatsApp gratuito**: usa directamente la columna `is_free` de `delivery_logs` (expone la sesión activa en `wa_sessions`). El ratio diario vive en `mv_wa_free_ratio_daily`.
+- **Rendimiento**: las vistas materializadas (`mv_*`) se refrescan con `REFRESH MATERIALIZED VIEW CONCURRENTLY`; evita consultas pesadas directamente sobre `scan_logs` históricos.
 
 ## Próximos pasos
 

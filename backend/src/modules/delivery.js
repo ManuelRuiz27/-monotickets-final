@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { query } from '../db/index.js';
 import { ensureRedis } from '../redis/client.js';
+import { normalizePhone, normalizeWhatsappPhone } from '../lib/phone.js';
 import { normalizeDeliveryPayload } from './delivery-templates.js';
 import {
   cacheDeliveryStatus,
@@ -163,6 +164,13 @@ export function createDeliveryModule(options = {}) {
     const sanitizedMetadata = sanitizeMetadata(metadata);
     const normalizedPayload = normalizeDeliveryPayload(payload);
 
+    let sessionInfo = null;
+    if (channel === 'whatsapp' && phone) {
+      sessionInfo = await findActiveWhatsappSession(normalizeWhatsappPhone(phone));
+    }
+    const isFreeSession = Boolean(sessionInfo?.isOpen);
+    const activeSessionId = isFreeSession ? sessionInfo?.id || null : null;
+
     const request = await createDeliveryRequest({
       organizerId,
       eventId,
@@ -187,6 +195,8 @@ export function createDeliveryModule(options = {}) {
       payload: normalizedPayload,
       metadata: sanitizedMetadata,
       requestIdHeader: requestId,
+      isFree: isFreeSession,
+      sessionId: activeSessionId,
     };
 
     const jobOptions = {
@@ -214,7 +224,10 @@ export function createDeliveryModule(options = {}) {
       throw error;
     }
 
-    await recordJobQueued(request.id, job.id);
+    await recordJobQueued(request.id, job.id, {
+      isFree: isFreeSession,
+      sessionId: activeSessionId,
+    });
 
     log({
       level: 'info',
@@ -330,38 +343,45 @@ export function createDeliveryModule(options = {}) {
       };
     }
     const client = await ensureRedis({ name: 'wa-sessions', env });
-    const sessionKey = getSessionKey(phone);
-    const ttlSeconds = await client.ttl(sessionKey);
-    if (ttlSeconds > 0) {
-      const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
-      return {
-        statusCode: 200,
-        payload: { phone, status: 'open', expiresAt, ttlSeconds },
-      };
+    const normalizedPhone = normalizeWhatsappPhone(phone);
+    const cacheKeys = [normalizedPhone, phone]
+      .filter((value) => typeof value === 'string' && value.length > 0)
+      .filter((value, index, arr) => arr.indexOf(value) === index);
+
+    for (const key of cacheKeys) {
+      const ttlSeconds = await client.ttl(getSessionKey(key));
+      if (ttlSeconds > 0) {
+        const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+        return {
+          statusCode: 200,
+          payload: { phone: key, status: 'open', expiresAt, ttlSeconds },
+        };
+      }
     }
 
+    const lookupKey = normalizedPhone || phone;
     let dbSession;
     try {
       dbSession = await query(
-        'SELECT phone, opened_at, expires_at FROM wa_sessions WHERE phone = $1',
-        [phone],
+        'SELECT id, phone, started_at, expires_at FROM wa_sessions WHERE phone = $1',
+        [lookupKey],
       );
     } catch (error) {
       log({
         level: 'error',
         message: 'wa_session_lookup_failed',
         error: error.message,
-        phone,
+        phone: lookupKey,
       });
       return {
         statusCode: 503,
-        payload: { phone, status: 'unknown', error: 'session_lookup_failed' },
+        payload: { phone: lookupKey, status: 'unknown', error: 'session_lookup_failed' },
       };
     }
     if (dbSession.rowCount === 0) {
       return {
         statusCode: 404,
-        payload: { phone, status: 'closed' },
+        payload: { phone: lookupKey, status: 'closed' },
       };
     }
 
@@ -373,7 +393,7 @@ export function createDeliveryModule(options = {}) {
     if (status === 'open') {
       const ttl = Math.floor((expiresAt.getTime() - now.getTime()) / 1000);
       if (ttl > 0) {
-        await client.set(sessionKey, 'open', 'EX', ttl);
+        await client.set(getSessionKey(row.phone), 'open', 'EX', ttl);
       }
     }
 
@@ -382,8 +402,9 @@ export function createDeliveryModule(options = {}) {
       payload: {
         phone: row.phone,
         status,
-        openedAt: row.opened_at,
+        startedAt: row.started_at,
         expiresAt: row.expires_at,
+        sessionId: row.id,
       },
     };
   }
@@ -516,12 +537,47 @@ async function createDeliveryRequest({
   };
 }
 
-async function recordJobQueued(requestId, jobId) {
-  await query(
-    `
-      UPDATE delivery_requests
-         SET last_job_id = $1,
-             current_status = 'queued',
+async function findActiveWhatsappSession(phone) {
+  if (!phone) {
+    return null;
+  }
+
+  try {
+    const result = await query(
+      `SELECT id, phone, started_at, expires_at FROM wa_sessions WHERE phone = $1`,
+      [phone],
+    );
+    if (result.rowCount === 0) {
+      return null;
+    }
+    const row = result.rows[0];
+    const expiresAt = new Date(row.expires_at);
+    const now = new Date();
+    const isOpen = expiresAt > now;
+    return {
+      id: row.id,
+      phone: row.phone,
+      startedAt: row.started_at,
+      expiresAt: row.expires_at,
+      isOpen,
+    };
+  } catch (error) {
+    log({
+      level: 'error',
+      message: 'wa_session_lookup_failed',
+      error: error.message,
+      phone,
+    });
+    return null;
+  }
+}
+
+  async function recordJobQueued(requestId, jobId, { isFree = false, sessionId = null } = {}) {
+    await query(
+      `
+        UPDATE delivery_requests
+           SET last_job_id = $1,
+               current_status = 'queued',
              updated_at = now()
        WHERE id = $2
     `,
@@ -530,13 +586,13 @@ async function recordJobQueued(requestId, jobId) {
 
   await query(
     `
-      INSERT INTO delivery_logs (request_id, attempt, status, queued_at, created_at)
-      SELECT $1, 0, 'queued', now(), now()
+      INSERT INTO delivery_logs (request_id, attempt, status, is_free, session_id, queued_at, created_at)
+      SELECT $1, 0, 'queued', $2, $3, now(), now()
        WHERE NOT EXISTS (
          SELECT 1 FROM delivery_logs WHERE request_id = $1 AND attempt = 0
        )
     `,
-    [requestId],
+    [requestId, isFree, sessionId],
   ).catch(() => {});
   await invalidateDeliveryStatusCache({ requestId, env });
 }
@@ -624,6 +680,8 @@ async function findDeliverySummaryByRequestId(requestId) {
         latest.status AS attempt_status,
         latest.provider_ref AS attempt_provider_ref,
         latest.error AS attempt_error,
+        latest.is_free AS attempt_is_free,
+        latest.session_id AS attempt_session_id,
         latest.started_at AS attempt_started_at,
         latest.completed_at AS attempt_completed_at,
         latest.created_at AS attempt_created_at
@@ -658,6 +716,8 @@ async function findDeliverySummaryByProviderRef(providerRef) {
         dl.status AS attempt_status,
         dl.provider_ref AS attempt_provider_ref,
         dl.error AS attempt_error,
+        dl.is_free AS attempt_is_free,
+        dl.session_id AS attempt_session_id,
         dl.started_at AS attempt_started_at,
         dl.completed_at AS attempt_completed_at,
         dl.created_at AS attempt_created_at
@@ -688,6 +748,8 @@ async function findDeliveryAttemptById(attemptId) {
         dl.status AS attempt_status,
         dl.provider_ref AS attempt_provider_ref,
         dl.error AS attempt_error,
+        dl.is_free AS attempt_is_free,
+        dl.session_id AS attempt_session_id,
         dl.started_at AS attempt_started_at,
         dl.completed_at AS attempt_completed_at,
         dl.created_at AS attempt_created_at
@@ -730,6 +792,8 @@ function mapDeliverySummary(row) {
           status: row.attempt_status,
           providerRef: row.attempt_provider_ref,
           error: row.attempt_error,
+          isFree: row.attempt_is_free,
+          sessionId: row.attempt_session_id,
           startedAt: row.attempt_started_at,
           completedAt: row.attempt_completed_at,
           createdAt: row.attempt_created_at,
@@ -747,13 +811,6 @@ function sanitizeMetadata(metadata) {
   } catch {
     return null;
   }
-}
-
-function normalizePhone(input) {
-  if (typeof input !== 'string') {
-    return '';
-  }
-  return input.replace(/\D+/g, '').replace(/^52(?=1?\d{10}$)/, '52');
 }
 
 function buildQueueBackoff(env = process.env) {
