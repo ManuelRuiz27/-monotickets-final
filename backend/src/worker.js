@@ -1,3 +1,4 @@
+import './config/load-env.js';
 import { randomUUID } from 'node:crypto';
 
 import { createLogger } from './logging.js';

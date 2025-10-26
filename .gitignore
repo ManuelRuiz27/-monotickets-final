@@ -1,0 +1,29 @@
+# Dependencies and build output
+node_modules/
+**/node_modules/
+**/.next/
+**/dist/
+**/build/
+coverage/
+reports/
+
+# Logs and temporary files
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# Local environment files
+.env
+.env.local
+.env.*.local
+.env.production
+.env.development
+.env.test
+!.env.example
+
+# Misc
+.DS_Store
+*.swp
+*.swo

@@ -1,3 +1,4 @@
+import './config/load-env.js';
 import { createServer, ensureDependencies, log } from './server.js';
 import { initializeDatabase } from './db/bootstrap.js';
 import { createLogger } from './logging.js';
