@@ -38,14 +38,17 @@ covers structured logs, metrics, dashboards, and alert recommendations.
 - Counter: `http_requests_total{method,route,status}` surfaces total processed
   requests and enables error-rate ratios.
 - Queue backlog gauge: `queue_backlog{queue}` reports waiting + delayed jobs for
-  each queue observed by the backend.
-- Queue failure counter: `jobs_failed_total{queue}` increases whenever queue
-  processors emit `failed` or `dead-letter` events.
+  every tracked queue. Primary labels: `wa_outbound`, `wa_inbound`, `payments`,
+  plus supporting queues such as `email`, `pdf`, and `delivery_failed`.
+- Queue counters:
+  - `jobs_failed_total{queue}` increases whenever queue processors emit
+    `failed` events (DLQ transitions are logged separately to avoid double
+    counting).
+  - `jobs_processed_total{queue}` increments for every successful completion and
+    enables failure-rate calculations.
 - Suggested Prometheus scrape configuration lives in
   `infra/monitoring/prometheus.example.yml`. Update the targets if the compose
   project name changes.
-- Workers currently only emit logs; instrument queue length gauges in future
-  iterations if BullMQ is introduced.
 
 Key queries:
 
@@ -55,8 +58,14 @@ Key queries:
   → p99 latency for events APIs.
 - `sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m]))`
   → aggregate HTTP error rate.
-- `queue_backlog{queue="deliveryFailed"}` → inspect dead-letter queue size.
-- `jobs_failed_total{queue}` → monitor cumulative failures per queue.
+- `queue_backlog{queue=~"wa_outbound|wa_inbound|payments"}` → current backlog
+  for messaging and payment workers.
+- `sum(rate(jobs_failed_total{queue=~"wa_outbound|wa_inbound|payments"}[15m]))`
+  → failure throughput per queue.
+- `sum(increase(jobs_failed_total{queue=~"wa_outbound|wa_inbound|payments"}[15m])) /
+   clamp_min(sum(increase(jobs_processed_total{queue=~"wa_outbound|wa_inbound|payments"}[15m])) +
+   sum(increase(jobs_failed_total{queue=~"wa_outbound|wa_inbound|payments"}[15m])), 1)` → queue
+  failure ratio.
 
 ### Scraping instructions
 
@@ -72,12 +81,18 @@ Key queries:
 
 ### Grafana dashboards
 
-- `infra/monitoring/grafana-dashboards/latency-api.json` is a placeholder. Import
-  it into Grafana and adjust the datasource to `Prometheus`.
-- Recommended panels:
-  - p95 latency per endpoint.
-  - Request rate vs error rate.
-  - Table of slowest endpoints (top N).
+- `infra/monitoring/grafana-dashboards/latency-api.json` ships with latency,
+  queue backlog, and queue failure trend panels. Import it into Grafana and set
+  the datasource to `Prometheus` (`PROMETHEUS_DS`).
+- Recommended additions:
+  - Keep the p95 latency timeseries to spot HTTP regressions.
+  - Use the "Queue backlog (jobs)" timeseries to visualise
+    `queue_backlog{queue=~"wa_outbound|wa_inbound|payments"}`; thresholds mark
+    warning (>50) and critical (>100) backlogs.
+  - Monitor "Queue failures (5m increase)" to highlight spikes in
+    `increase(jobs_failed_total[5m])`.
+  - Add a stat panel for the queue failure ratio query (above) if proactive
+    alerting is required.
 
 ## Alerting recommendations
 
@@ -94,7 +109,7 @@ a- latency_high:
       summary: "Backend p95 latency high"
       description: "p95 latency {{ $value }}s for {{ $labels.route }}"
 
-# Error rate > 2% across all endpoints
+# HTTP error rate > 2% across all endpoints
 a- error_rate_high:
     expr: sum(rate(http_requests_total{status=~"5.."}[10m])) / sum(rate(http_requests_total[10m])) > 0.02
     for: 10m
@@ -102,6 +117,28 @@ a- error_rate_high:
       severity: critical
     annotations:
       summary: "HTTP 5xx rate above 2%"
+
+# Queue backlog above 100 jobs for 10 minutes
+a- queue_backlog_high:
+    expr: max(queue_backlog{queue=~"wa_outbound|wa_inbound|payments"}) > 100
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Queue backlog elevated"
+      description: "{{ $labels.queue }} backlog is {{ $value }} jobs"
+
+# Queue failure ratio > 1% over 15 minutes
+a- queue_failure_ratio_high:
+    expr: sum(increase(jobs_failed_total{queue=~"wa_outbound|wa_inbound|payments"}[15m])) /
+      clamp_min(sum(increase(jobs_processed_total{queue=~"wa_outbound|wa_inbound|payments"}[15m])) +
+      sum(increase(jobs_failed_total{queue=~"wa_outbound|wa_inbound|payments"}[15m])), 1) > 0.01
+    for: 15m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Queue failure ratio above 1%"
+      description: "Failures affecting {{ $labels.queue }} exceed 1%"
 ```
 
 > Replace `a-` with your alert group naming convention.

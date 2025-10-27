@@ -1071,12 +1071,12 @@ function computeNextDailyRun({ now, hour, minute }) {
 function scheduleQueueMetrics() {
   const interval = Number(env.QUEUE_METRICS_INTERVAL_MS || 30000);
   const trackedQueues = [
-    { name: 'whatsapp', queue: new SimpleQueue(whatsappQueueName, { connectionOptions: { env, logger } }) },
+    { name: 'wa_outbound', queue: new SimpleQueue(whatsappQueueName, { connectionOptions: { env, logger } }) },
+    { name: 'wa_inbound', queue: new SimpleQueue(waInboundQueueName, { connectionOptions: { env, logger } }) },
+    { name: 'payments', queue: new SimpleQueue(paymentsQueueName, { connectionOptions: { env, logger } }) },
     { name: 'email', queue: new SimpleQueue(emailQueueName, { connectionOptions: { env, logger } }) },
     { name: 'pdf', queue: new SimpleQueue(pdfQueueName, { connectionOptions: { env, logger } }) },
-    { name: 'waInbound', queue: new SimpleQueue(waInboundQueueName, { connectionOptions: { env, logger } }) },
-    { name: 'payments', queue: new SimpleQueue(paymentsQueueName, { connectionOptions: { env, logger } }) },
-    { name: 'deliveryFailed', queue: deliveryFailedQueue },
+    { name: 'delivery_failed', queue: deliveryFailedQueue },
   ];
 
   const logMetrics = async () => {

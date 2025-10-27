@@ -28,6 +28,7 @@ const metricsRegistry = new Map();
 const requestTotals = new Map();
 const queueBacklogGauge = new Map();
 const queueFailuresCounter = new Map();
+const queueProcessedCounter = new Map();
 const APP_VERSION = packageJson.version || '0.0.0';
 const APP_BOOT_TIME_MS = Date.now();
 const DEFAULT_GUEST_LIST_LIMIT = 50;
@@ -120,6 +121,14 @@ function renderMetrics() {
     }
   }
 
+  if (queueProcessedCounter.size > 0) {
+    lines.push('# HELP jobs_processed_total Total number of completed queue jobs.');
+    lines.push('# TYPE jobs_processed_total counter');
+    for (const [queue, total] of queueProcessedCounter.entries()) {
+      lines.push(`jobs_processed_total{queue="${queue}"} ${total}`);
+    }
+  }
+
   return `${lines.join('\n')}\n`;
 }
 
@@ -128,10 +137,22 @@ function incrementQueueFailures(queue) {
   queueFailuresCounter.set(queue, current + 1);
 }
 
+function incrementQueueProcessed(queue) {
+  const current = queueProcessedCounter.get(queue) || 0;
+  queueProcessedCounter.set(queue, current + 1);
+}
+
 function updateQueueBacklog(snapshot = []) {
-  snapshot.forEach(({ name, waiting = 0, delayed = 0 }) => {
-    queueBacklogGauge.set(name, Number(waiting || 0) + Number(delayed || 0));
+  const seen = new Set();
+  snapshot.forEach(({ label, waiting = 0, delayed = 0 }) => {
+    seen.add(label);
+    queueBacklogGauge.set(label, Number(waiting || 0) + Number(delayed || 0));
   });
+  for (const label of Array.from(queueBacklogGauge.keys())) {
+    if (!seen.has(label)) {
+      queueBacklogGauge.delete(label);
+    }
+  }
 }
 
 export function createServer(options = {}) {
@@ -1231,23 +1252,36 @@ function attachQueueObservers(queuesPromise, logger, env) {
   queuesPromise
     .then((queues) => {
       const watchers = [
-        { name: 'delivery', events: queues.whatsappEvents, queue: queues.whatsappQueue },
-        { name: 'email', events: queues.emailEvents, queue: queues.emailQueue },
-        { name: 'pdf', events: queues.pdfEvents, queue: queues.pdfQueue },
-        { name: 'deliveryFailed', events: queues.deliveryFailedEvents, queue: queues.deliveryFailedQueue },
-        { name: 'waInbound', events: queues.waInboundEvents, queue: queues.waInboundQueue },
-        { name: 'payments', events: queues.paymentsEvents, queue: queues.paymentsQueue },
+        { label: 'wa_outbound', events: queues.waOutboundEvents, queue: queues.waOutboundQueue },
+        { label: 'wa_inbound', events: queues.waInboundEvents, queue: queues.waInboundQueue },
+        { label: 'payments', events: queues.paymentsEvents, queue: queues.paymentsQueue },
+        { label: 'email', events: queues.emailEvents, queue: queues.emailQueue },
+        { label: 'pdf', events: queues.pdfEvents, queue: queues.pdfQueue },
+        { label: 'delivery_failed', events: queues.deliveryFailedEvents, queue: queues.deliveryFailedQueue },
       ];
 
-      watchers.forEach(({ name, events }) => {
+      watchers.forEach(({ label, events }) => {
         if (!events) return;
         events.on('failed', ({ jobId, job }) => {
-          incrementQueueFailures(name);
+          incrementQueueFailures(label);
           log(
             {
               level: 'warn',
               message: 'queue_job_failed',
-              queue: name,
+              queue: label,
+              job_id: jobId,
+              request_id: job?.requestId,
+            },
+            { logger },
+          );
+        });
+        events.on('completed', ({ jobId, job }) => {
+          incrementQueueProcessed(label);
+          log(
+            {
+              level: 'info',
+              message: 'queue_job_completed',
+              queue: label,
               job_id: jobId,
               request_id: job?.requestId,
             },
@@ -1255,12 +1289,11 @@ function attachQueueObservers(queuesPromise, logger, env) {
           );
         });
         events.on('dead-letter', ({ jobId, job }) => {
-          incrementQueueFailures(name);
           log(
             {
               level: 'error',
               message: 'queue_job_dead_letter',
-              queue: name,
+              queue: label,
               job_id: jobId,
               request_id: job?.requestId,
             },
@@ -1273,12 +1306,15 @@ function attachQueueObservers(queuesPromise, logger, env) {
       const emitMetrics = async () => {
         try {
           const snapshot = await Promise.all(
-            watchers.map(async ({ name, queue }) => ({
-              name,
-              waiting: await queue.countWaiting(),
-              delayed: await queue.countDelayed(),
-              active: await queue.countActive(),
-            })),
+            watchers
+              .filter(({ queue }) => Boolean(queue))
+              .map(async ({ label, queue }) => ({
+                label,
+                queue: queue.name,
+                waiting: await queue.countWaiting(),
+                delayed: await queue.countDelayed(),
+                active: await queue.countActive(),
+              })),
           );
           updateQueueBacklog(snapshot);
           log({ level: 'info', message: 'queue_metrics_snapshot', queues: snapshot }, { logger });
