@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Prepare env file
+        run: cp .env.example .env
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Pull images
@@ -62,6 +64,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Prepare env file
+        run: cp .env.example .env
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Build test container
