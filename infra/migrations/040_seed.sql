@@ -116,6 +116,14 @@ event_seed AS (
             'active',
             date_trunc('hour', now() + interval '15 days') + interval '10 hours',
             date_trunc('hour', now() + interval '15 days') + interval '18 hours'
+        ),
+        (
+            (SELECT id FROM organizer_seed WHERE name = 'Luminaria Producciones'),
+            'After Office Backstage',
+            'standard',
+            'active',
+            date_trunc('hour', now() + interval '1 day') + interval '19 hours',
+            date_trunc('hour', now() + interval '1 day') + interval '23 hours'
         )
     RETURNING id, organizer_id, type, name, starts_at
 ),

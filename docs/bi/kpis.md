@@ -14,8 +14,22 @@ Las vistas materializadas (`mv_*`) se crean en `infra/migrations/100_mv_kpis.sql
 
 ## 3. Ratio de sesiones gratuitas de WhatsApp (`mv_wa_free_ratio_daily`)
 - **Definición**: `sesiones_gratuitas / total_mensajes_whatsapp` por `event_id` y día (`delivery_logs.created_at`).
-- **Inputs**: `delivery_logs` filtrado por `channel='whatsapp'` y `status IN ('sent','delivered')`, usando directamente la columna `is_free`.
-- **Notas**: `session_id` enlaza cada intento con `wa_sessions` (ventana activa y metadata del último mensaje). Permite validar desde BI si un mensaje cobró o no según la sesión abierta.
+- **Inputs**: `delivery_logs` filtrado por `channel='whatsapp'` y `status IN ('sent','delivered')`, tomando la bandera `is_free` y los enlaces `session_id`.
+- **Notas**: `session_id` enlaza cada intento con `wa_sessions`, eliminando heurísticas previas y permitiendo auditar si cada mensaje cayó dentro de una sesión abierta.
+
+### Tabla de soporte `wa_sessions`
+
+- **Propósito**: persistir la ventana activa de 24 h para cada número normalizado de WhatsApp.
+- **Columnas clave**:
+  - `phone`: número E.164 sin caracteres especiales (único por fila).
+  - `started_at` / `expires_at`: delimitan la ventana elegible para enviar mensajes gratuitos.
+  - `last_message_at`: referencia del último inbound o outbound que renovó la sesión.
+  - `metadata`: JSON para anotar el contexto (`guest_id`, `event_id`, etiquetas de seed, etc.).
+  - `created_at` / `updated_at`: trazan la vigencia y facilitan depuración.
+- **Relación con `delivery_logs`**:
+  - `delivery_logs.session_id` apunta al registro de `wa_sessions` vigente cuando se intentó el envío.
+  - `delivery_logs.is_free` se marca en `true` solo cuando existe una sesión activa al momento de crear el intento, dejando rastro contable cuando se factura un mensaje fuera de ventana.
+  - Las vistas `mv_wa_free_ratio_daily` y `mv_kpi_wa_sessions_ratio` contabilizan ambos campos para análisis operativos y ejecutivos.
 
 ## 4. Mix de eventos 90 días (`mv_event_mix_90d`)
 - **Definición**: conteo de eventos y de invitados por tipo (`standard|premium`) y día (`date_trunc('day', events.starts_at)`) en una ventana rodante de 90 días.
@@ -32,7 +46,7 @@ Las vistas materializadas (`mv_*`) se crean en `infra/migrations/100_mv_kpis.sql
 - **Sin `pg_cron`**: levanta un worker (Node/TS) conectado a la misma base para ejecutar periódicamente `REFRESH MATERIALIZED VIEW CONCURRENTLY ...` con un backoff (ej. usar la cola existente documentada en `ADR` de VM-Workers). Mantén los intervalos sugeridos arriba.
 
 ## Particiones de `scan_logs` y `delivery_logs`
-El worker de backend agenda automáticamente un job mensual (`runLogPartitionMaintenanceJob`) que:
+El worker de backend agenda automáticamente un job diario (`runLogPartitionMaintenanceJob`) que:
 
 - Verifica que existan particiones para el mes anterior, el actual y el siguiente.
 - Crea de forma anticipada la partición del siguiente mes (por defecto 5 días antes de iniciar el mes, configurable con `SCAN_LOG_PARTITION_LEAD_DAYS`, `SCAN_LOG_PARTITION_HOUR` y `SCAN_LOG_PARTITION_MINUTE`).
@@ -40,4 +54,4 @@ El worker de backend agenda automáticamente un job mensual (`runLogPartitionMai
 
 El job escribe en logs cada creación/eliminación y emite un mensaje de error (`log_partition_missing` o `log_partition_missing_after_attempt`) cuando detecta particiones faltantes para los meses requeridos.
 
-Para ejecuciones manuales existe el script `backend/scripts/cleanup-log-partitions.js` que reutiliza la misma lógica; acepta la bandera `--dry-run` para validar sin aplicar cambios.
+Consulta `docs/db/README.md` para ver la tabla completa de variables (`SCAN_LOG_*`) y pasos de verificación. Para ejecuciones manuales existe el script `backend/scripts/cleanup-log-partitions.js` que reutiliza la misma lógica; acepta la bandera `--dry-run` para validar sin aplicar cambios.

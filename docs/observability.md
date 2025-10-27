@@ -31,24 +31,40 @@ covers structured logs, metrics, dashboards, and alert recommendations.
 
 ## Metrics
 
-- The backend exposes Prometheus-compatible metrics at `GET /metrics`.
+- The backend exposes Prometheus-compatible metrics at `GET /metrics` (see the
+  sample capture below). The endpoint mezcla los contadores HTTP con la
+  instrumentación de BullMQ para mantener una única superficie de scraping.
 - Histogram name: `http_request_duration_ms` with `_bucket`, `_sum`, `_count`
   series. Buckets follow `[5,10,25,50,100,250,500,1000,2500,5000,+Inf]` ms and
   include the labels `method`, `route`, `status`.
 - Counter: `http_requests_total{method,route,status}` surfaces total processed
   requests and enables error-rate ratios.
-- Queue backlog gauge: `queue_backlog{queue}` reports waiting + delayed jobs for
-  every tracked queue. Primary labels: `wa_outbound`, `wa_inbound`, `payments`,
-  plus supporting queues such as `email`, `pdf`, and `delivery_failed`.
-- Queue counters:
+- BullMQ gauges and counters:
+  - `queue_backlog{queue}` reports waiting + delayed jobs for every tracked
+    queue (`wa_outbound`, `wa_inbound`, `payments`, `email`, `pdf`,
+    `delivery_failed`). Values come from `queue_metrics_snapshot` logs emitted
+    by API y worker cada `QUEUE_METRICS_INTERVAL_MS` (default 30 s).
   - `jobs_failed_total{queue}` increases whenever queue processors emit
     `failed` events (DLQ transitions are logged separately to avoid double
     counting).
   - `jobs_processed_total{queue}` increments for every successful completion and
-    enables failure-rate calculations.
+    enables failure-rate calculations together with `jobs_failed_total`.
 - Suggested Prometheus scrape configuration lives in
   `infra/monitoring/prometheus.example.yml`. Update the targets if the compose
   project name changes.
+
+![Mock output of /metrics endpoint](bi/assets/api-metrics.svg)
+
+### BullMQ instrumentation
+
+- API y worker ejecutan `scheduleQueueMetrics`/`attachQueueObservers`, lo que
+  emite logs `queue_metrics_snapshot` y `queue_metrics` con contadores de
+  `waiting`, `delayed`, `active`, `completed`, `failed`, `deadLetter`.
+- Ajusta `QUEUE_METRICS_INTERVAL_MS` si necesitas granularidad distinta para el
+  monitoreo (30 s local, 60 s staging/producción recomendado).
+- Los eventos `queue_job_failed`, `queue_job_dead_letter` y
+  `queue_job_completed` incluyen `request_id` cuando está disponible, lo que
+  facilita correlacionar reintentos y DLQs en Loki.
 
 Key queries:
 
@@ -139,6 +155,17 @@ a- queue_failure_ratio_high:
     annotations:
       summary: "Queue failure ratio above 1%"
       description: "Failures affecting {{ $labels.queue }} exceed 1%"
+
+# Queue stuck active for 15 minutes (BullMQ watchdog)
+a- queue_stuck_active:
+    expr: max_over_time(queue_backlog{queue=~"wa_outbound|wa_inbound|payments"}[5m]) > 0
+      and sum(rate(jobs_processed_total{queue=~"wa_outbound|wa_inbound|payments"}[15m])) == 0
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: "BullMQ queue has backlog but no throughput"
+      description: "{{ $labels.queue }} backlog growing without completed jobs"
 ```
 
 > Replace `a-` with your alert group naming convention.

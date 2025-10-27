@@ -25,7 +25,7 @@ Metabase es el contenedor de BI ligero del stack de Monotickets. Permite explora
 
 ## Automatización de dashboards
 
-El script `scripts/bi/setup-metabase-dashboards.js` crea colecciones, tarjetas y dashboards para **Organizer – Operación** y **Director – Ejecutivo** usando la API de Metabase. También asigna permisos de lectura a los grupos configurados y aplica filtros parametrizados por evento y organizador.
+El script `scripts/bi/setup-metabase-dashboards.js` crea colecciones, tarjetas y dashboards para **Organizer – Operación** y **Director – Ejecutivo** usando la API de Metabase. También asigna permisos de lectura a los grupos configurados y aplica filtros parametrizados por evento y organizador. Las tarjetas se alimentan del dataset demo actualizado (eventos *Gala Innovación 2024*, *Summit Premium Riviera* y *After Office Backstage*), generado por la migración `infra/migrations/040_seed.sql`.
 
 ### Variables necesarias
 
@@ -56,8 +56,11 @@ npm run setup:metabase
 El script refresca o crea:
 
 - Colecciones: `Monotickets – Dashboards`, `Organizer – Operación`, `Director – Ejecutivo`.
-- Tarjetas con filtros de `event_id` y `organizer_id` basados en las vistas materializadas (`mv_*`).
-- Dashboards con notas sobre la heurística de WhatsApp gratuito y equivalencias de tickets.
+- Tarjetas parametrizadas (`event_id`, `organizer_id`) construidas sobre las vistas materializadas y tablas operativas nuevas:
+  - `Confirmación hoy`, `Show-up hoy`, `Ratio WA gratuito 24h` (usa `delivery_logs.is_free` + `wa_sessions`).
+  - `Confirmación últimos 7 días`, `Escaneos por hora (hoy)`.
+  - `Mix de tipos de evento`, `Organizadores activos (90d)`, `Deuda abierta`, `Top organizadores por tickets` y `Invitados (detalle)` en la colección ejecutiva.
+- Dashboards con descripciones que apuntan a `wa_sessions` y a los enlaces `invites.links` para trazabilidad sin heurísticas.
 
 ### Integración continua
 
@@ -68,12 +71,21 @@ El workflow `ci.yml` incluye el job opcional **Sync Metabase Dashboards**, que:
 
 Activa el job definiendo `METABASE_DASHBOARDS_ENABLED=true` en *Repository Variables* y cargando los secrets `STAGING_DB_*`, `METABASE_*` mencionados arriba.
 
+## Datos de demostración
+
+- **Eventos**: la semilla crea tres eventos activos (dos futuros, uno en curso) para probar dashboards diarios y comparativos.
+- **Invitados**: 16 invitados por evento con estados `pending`, `confirmed`, `scanned` y confirmaciones mixtas (WhatsApp/email).
+- **Sesiones**: `wa_sessions` incluye registros con `metadata` (`guest_id`, `event_id`) y ventanas de expiración distribuidas para graficar el ratio gratuito.
+- **Mensajería**: `delivery_logs` incorpora `is_free`, `session_id` y distintos estatus (`queued`, `sent`, `delivered`, `failed`) para validar los KPIs.
+- **Finanzas**: `ticket_ledger` y `payments` extienden los movimientos para alimentar el dashboard ejecutivo.
+
 ## Verificación
 
 - Dashboard operativo: [Organizer – Operación](https://metabase.staging.monotickets.test/dashboard/organizer-operacion) (filtros por evento y organizador activos).
-- Dashboard ejecutivo: [Director – Ejecutivo](https://metabase.staging.monotickets.test/dashboard/director-ejecutivo) (notas sobre WA gratuito y equivalencias de tickets en la descripción).
+- Dashboard ejecutivo: [Director – Ejecutivo](https://metabase.staging.monotickets.test/dashboard/director-ejecutivo) (las notas explican cómo `is_free` y `wa_sessions` alimentan el ratio).
+- Captura de referencia: ![Layout demo del dashboard operativo](assets/dashboard-organizer.svg)
 
-Actualiza las capturas en este README cuando cambie el layout o la cobertura de KPIs.
+Actualiza la captura cuando cambie el layout o la cobertura de KPIs.
 
 ## Buenas prácticas de dashboard
 

@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+## [v1.0.0-MVP] - 2025-10-15
+
+- Documented the WhatsApp sessions table and `delivery_logs.is_free` across BI
+  and Metabase docs, refreshing dashboard assets for the final dataset
+  (`docs/bi/kpis.md`, `docs/bi/README.md`, `docs/bi/assets/*`).
+- Added BullMQ instrumentation guidance with queue metrics, Alertmanager rules
+  and example `/metrics` capture (`docs/observability.md`).
+- Clarified the daily cron for log partitions, lead/retention variables and
+  manual scripts (`docs/db/README.md`).
+- Refreshed demo data for migrations and PWA fallbacks (new events, guests and
+  WhatsApp sessions) (`infra/migrations/040_seed.sql`,
+  `frontend/pwa/lib/api/guest.ts`).
+- Synced environment templates with queue/WhatsApp session settings for local
+  and staging deployments (`env/.env.local.example`,
+  `env/.env.staging.example`).
+- Release tag prepared: **v1.0.0-MVP** (ready for deploy).
+
+### Deploy checklist
+
+1. Ejecutar migraciones: `./infra/scripts/apply-migrations.sh` (usa las
+   credenciales del entorno destino).
+2. Refrescar seed/demo en entornos de QA o staging: `./infra/scripts/seed.sh`.
+3. Reiniciar worker/API para cargar variables nuevas (`QUEUE_METRICS_INTERVAL_MS`,
+   `SCAN_LOG_*`, `WA_SESSION_TTL_SECONDS`).
+4. QA final (funcionalidad, rendimiento, UX):
+   - `npm run test:e2e:all`
+   - `npm run smoke:services` && `npm run smoke:readiness`
+
+## [Earlier updates]
+
 - (2025-10-13) Localized the compose source-of-truth banner and refreshed env
   templates for local/staging placeholders (`infra/docker-compose.yml`,
   `env/.env.local.example`, `env/.env.staging.example`).

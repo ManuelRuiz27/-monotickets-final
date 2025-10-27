@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" role="img" aria-labelledby="title desc">
+  <title id="title">Mock dashboard layout for Organizer – Operación</title>
+  <desc id="desc">Placeholder capture describing the dashboard structure with cards for KPIs and tables.</desc>
+  <rect x="0" y="0" width="1280" height="720" fill="#0f172a" />
+  <rect x="40" y="40" width="1200" height="100" rx="12" fill="#1f2937" />
+  <text x="60" y="100" font-family="'Inter', sans-serif" font-size="48" fill="#f8fafc">Organizer – Operación (demo)</text>
+  <rect x="40" y="160" width="360" height="180" rx="16" fill="#2563eb" opacity="0.88" />
+  <text x="60" y="220" font-size="32" font-family="'Inter', sans-serif" fill="#f8fafc">Confirmación hoy</text>
+  <rect x="440" y="160" width="360" height="180" rx="16" fill="#10b981" opacity="0.88" />
+  <text x="460" y="220" font-size="32" font-family="'Inter', sans-serif" fill="#0f172a">Show-up hoy</text>
+  <rect x="840" y="160" width="400" height="180" rx="16" fill="#f59e0b" opacity="0.88" />
+  <text x="860" y="220" font-size="32" font-family="'Inter', sans-serif" fill="#0f172a">WA gratuito 24h</text>
+  <rect x="40" y="360" width="760" height="300" rx="16" fill="#0ea5e9" opacity="0.88" />
+  <text x="60" y="420" font-size="32" font-family="'Inter', sans-serif" fill="#0f172a">Confirmación últimos 7 días</text>
+  <rect x="840" y="360" width="400" height="300" rx="16" fill="#8b5cf6" opacity="0.88" />
+  <text x="860" y="420" font-size="32" font-family="'Inter', sans-serif" fill="#f8fafc">Escaneos por hora</text>
+  <rect x="40" y="680" width="1200" height="20" fill="#1f2937" />
+</svg>

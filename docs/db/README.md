@@ -52,12 +52,22 @@ El worker de backend (`backend/src/jobs/kpi-refresh.js`) ejecuta `runKpiRefreshJ
 El intervalo del job se controla con `KPI_REFRESH_INTERVAL_MINUTES` (por defecto 30 minutos) y puede forzarse con la bandera `--force` al iniciar el worker.
 
 ## 4. Mantenimiento de particiones en `scan_logs` y `delivery_logs`
+El worker (`backend/src/worker.js`) agenda `runLogPartitionMaintenanceJob` como un cron diario en horario UTC.
 
-El worker (`backend/src/worker.js`) ejecuta mensualmente `runLogPartitionMaintenanceJob`, encargado de:
+| Variable | Default | Descripción |
+| --- | --- | --- |
+| `SCAN_LOG_PARTITION_HOUR` | `2` | Hora (UTC) en la que corre el job diario. |
+| `SCAN_LOG_PARTITION_MINUTE` | `30` | Minuto (UTC) programado para la ejecución. |
+| `SCAN_LOG_PARTITION_LEAD_DAYS` | `5` | Días de anticipación para crear la partición del mes siguiente. |
+| `SCAN_LOG_RETENTION_DAYS` | `180` | Ventana máxima de retención; particiones completas más antiguas se eliminan. |
 
-- Garantizar particiones para el mes anterior, el actual y el siguiente; ante una ausencia emite un log `log_partition_missing`.
-- Crear automáticamente la partición del mes siguiente unos días antes de iniciar (por defecto 5 días antes, configurable vía `SCAN_LOG_PARTITION_LEAD_DAYS`, `SCAN_LOG_PARTITION_HOUR` y `SCAN_LOG_PARTITION_MINUTE`).
-- Eliminar particiones completas más antiguas que `SCAN_LOG_RETENTION_DAYS` (valor entre 90 y 180 días, default 180).
+El flujo automático realiza lo siguiente:
+
+1. Garantiza particiones para el mes anterior, el corriente y el siguiente. Si falta alguna partición se emite `log_partition_missing` o `log_partition_missing_after_attempt`.
+2. Crea anticipadamente la partición del mes siguiente cuando `now()` cae dentro de la ventana definida por `SCAN_LOG_PARTITION_LEAD_DAYS`.
+3. Borra particiones completas con rango de fechas anterior a `current_date - SCAN_LOG_RETENTION_DAYS`, asegurando una ventana controlada entre 90 y 180 días.
+
+### Ejecución manual y validaciones
 
 Para entornos donde se necesite ejecutar la limpieza manualmente (staging/producción) existe el script:
 
@@ -66,7 +76,9 @@ cd backend
 SCAN_LOG_RETENTION_DAYS=120 npm run cleanup:log-partitions
 ```
 
-Incluye la bandera `--dry-run` (`npm run cleanup:log-partitions -- --dry-run`) para revisar qué acciones se tomarían sin aplicarlas.
+Incluye la bandera `--dry-run` (`npm run cleanup:log-partitions -- --dry-run`) para revisar qué acciones se tomarían sin aplicar las.
+
+Los logs del worker incluyen `log_partition_job_scheduled` con la próxima ejecución y `log_partition_job_completed` al finalizar; revisa CloudWatch/Loki (según entorno) para confirmar la creación o eliminación de particiones.
 
 ## 5. Limpieza y resiembra
 
