@@ -12,7 +12,8 @@
     "test:e2e:wa": "node ./tests/scripts/run-e2e.js -t @wa",
     "test:post": "node ./tests/scripts/collect-artifacts.js || true",
     "smoke:services": "bash ./infra/check-services.sh",
-    "smoke:readiness": "bash ./infra/check-readiness.sh"
+    "smoke:readiness": "bash ./infra/check-readiness.sh",
+    "setup:metabase": "node ./scripts/bi/setup-metabase-dashboards.js"
   },
   "devDependencies": {
     "@playwright/test": "^1.41.0",

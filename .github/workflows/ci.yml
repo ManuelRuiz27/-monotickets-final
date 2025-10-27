@@ -157,3 +157,35 @@ jobs:
           name: testsprite-report
           path: testsprite-report/
           if-no-files-found: ignore
+
+  metabase-dashboards:
+    name: Sync Metabase Dashboards
+    runs-on: ubuntu-latest
+    needs:
+      - testsprite
+    if: ${{ vars.METABASE_DASHBOARDS_ENABLED == 'true' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install dependencies
+        run: npm ci
+      - name: Refresh staging KPI views
+        env:
+          DB_HOST: ${{ secrets.STAGING_DB_HOST }}
+          DB_PORT: ${{ secrets.STAGING_DB_PORT }}
+          DB_USER: ${{ secrets.STAGING_DB_USER }}
+          DB_NAME: ${{ secrets.STAGING_DB_NAME }}
+          PGPASSWORD: ${{ secrets.STAGING_DB_PASSWORD }}
+        run: ./infra/refresh-bi-views.sh
+      - name: Create or update Metabase dashboards
+        env:
+          METABASE_SITE_URL: ${{ secrets.METABASE_SITE_URL }}
+          METABASE_SESSION_TOKEN: ${{ secrets.METABASE_SESSION_TOKEN }}
+          METABASE_DATABASE_ID: ${{ secrets.METABASE_DATABASE_ID }}
+          METABASE_ORGANIZER_GROUP_ID: ${{ secrets.METABASE_ORGANIZER_GROUP_ID }}
+          METABASE_DIRECTOR_GROUP_ID: ${{ secrets.METABASE_DIRECTOR_GROUP_ID }}
+        run: npm run setup:metabase
