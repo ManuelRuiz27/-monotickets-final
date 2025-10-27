@@ -55,27 +55,56 @@ jobs:
               core.setFailed('Missing target SHA for deployment.');
               return;
             }
-            const { data } = await github.rest.actions.listWorkflowRuns({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'ci.yml',
-              per_page: 20,
-            });
-            const run = data.workflow_runs.find((r) => r.head_sha === sha);
+
+            const findRunForSha = async (candidateSha) => {
+              const { data } = await github.rest.actions.listWorkflowRuns({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: 'ci.yml',
+                per_page: 50,
+              });
+              return data.workflow_runs.find((r) => r.head_sha === candidateSha);
+            };
+
+            let run = await findRunForSha(sha);
+
+            if (!run) {
+              core.info(`CI workflow not found for ${sha}; attempting associated PR head commits.`);
+              const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                commit_sha: sha,
+              });
+              for (const pr of prs) {
+                const candidateSha = pr.head && pr.head.sha;
+                if (!candidateSha) {
+                  continue;
+                }
+                run = await findRunForSha(candidateSha);
+                if (run) {
+                  core.info(`Using CI workflow from PR #${pr.number} (head ${candidateSha}) to validate ${sha}.`);
+                  break;
+                }
+              }
+            }
+
             if (!run) {
               core.setFailed(`CI workflow not found for ${sha}`);
               return;
             }
+
             if (run.conclusion !== 'success') {
               core.setFailed(`CI workflow for ${sha} did not succeed (state: ${run.conclusion}).`);
               return;
             }
+
             const jobs = await github.rest.actions.listJobsForWorkflowRun({
               owner: context.repo.owner,
               repo: context.repo.repo,
               run_id: run.id,
               per_page: 50,
             });
+
             // BEGIN devops-ci
             const requiredJobs = ['Smoke', 'E2E', 'TestSprite QA'];
             for (const jobName of requiredJobs) {
@@ -86,6 +115,7 @@ jobs:
               }
             }
             // END devops-ci
+
             core.info(`CI checks (lint, unit, smoke, e2e, TestSprite) succeeded for ${sha}.`);
 
       - name: Checkout repository
