@@ -23,13 +23,57 @@ Metabase es el contenedor de BI ligero del stack de Monotickets. Permite explora
      - **Contraseña**: `${DB_PASSWORD}`
    - También puedes omitir la conexión en el onboarding y agregarla después en *Admin settings → Databases*.
 
-## Colecciones y tarjetas de ejemplo
+## Automatización de dashboards
 
-1. Crea la colección **“Monotickets – Operación”**.
-2. Publica las primeras tarjetas demo sobre los datos sembrados:
-   - **Guests por status (hoy)**: usa la tabla `guests`, filtra por `date_trunc('day', created_at) = current_date` y agrupa por `status`.
-   - **Scan logs últimos 7 días por result**: tabla `scan_logs`, filtra por `ts >= now() - interval '7 days'` y agrupa por `result`.
-3. Documenta en la descripción de la colección qué supuestos cubren las tarjetas (e.g., la semilla incluye eventos standard y premium con show-up del 60–80%).
+El script `scripts/bi/setup-metabase-dashboards.js` crea colecciones, tarjetas y dashboards para **Organizer – Operación** y **Director – Ejecutivo** usando la API de Metabase. También asigna permisos de lectura a los grupos configurados y aplica filtros parametrizados por evento y organizador.
+
+### Variables necesarias
+
+Configura las siguientes variables/secrets antes de ejecutar el script (local o CI):
+
+| Variable | Descripción |
+| --- | --- |
+| `METABASE_SITE_URL` | URL base del Metabase (por ejemplo `https://metabase.staging.monotickets.test`). |
+| `METABASE_DATABASE_ID` | ID interno de la base de datos PostgreSQL configurada en Metabase. |
+| `METABASE_SESSION_TOKEN` **o** (`METABASE_USERNAME`, `METABASE_PASSWORD`) | Credenciales para autenticarse contra la API. |
+| `METABASE_ORGANIZER_GROUP_ID` | ID del grupo que debe ver el dashboard operativo. |
+| `METABASE_DIRECTOR_GROUP_ID` | ID del grupo con acceso al dashboard ejecutivo. |
+
+Los jobs de CI usan secrets homónimos y un repo variable `METABASE_DASHBOARDS_ENABLED=true` para habilitar la tarea opcional.
+
+### Ejecución manual
+
+```bash
+METABASE_SITE_URL=https://metabase.local \
+METABASE_USERNAME=admin@monotickets.test \
+METABASE_PASSWORD=supersecret \
+METABASE_DATABASE_ID=2 \
+METABASE_ORGANIZER_GROUP_ID=5 \
+METABASE_DIRECTOR_GROUP_ID=6 \
+npm run setup:metabase
+```
+
+El script refresca o crea:
+
+- Colecciones: `Monotickets – Dashboards`, `Organizer – Operación`, `Director – Ejecutivo`.
+- Tarjetas con filtros de `event_id` y `organizer_id` basados en las vistas materializadas (`mv_*`).
+- Dashboards con notas sobre la heurística de WhatsApp gratuito y equivalencias de tickets.
+
+### Integración continua
+
+El workflow `ci.yml` incluye el job opcional **Sync Metabase Dashboards**, que:
+
+1. Refresca las vistas materializadas de BI en staging mediante `infra/refresh-bi-views.sh`.
+2. Ejecuta `npm run setup:metabase` para actualizar colecciones y dashboards.
+
+Activa el job definiendo `METABASE_DASHBOARDS_ENABLED=true` en *Repository Variables* y cargando los secrets `STAGING_DB_*`, `METABASE_*` mencionados arriba.
+
+## Verificación
+
+- Dashboard operativo: [Organizer – Operación](https://metabase.staging.monotickets.test/dashboard/organizer-operacion) (filtros por evento y organizador activos).
+- Dashboard ejecutivo: [Director – Ejecutivo](https://metabase.staging.monotickets.test/dashboard/director-ejecutivo) (notas sobre WA gratuito y equivalencias de tickets en la descripción).
+
+Actualiza las capturas en este README cuando cambie el layout o la cobertura de KPIs.
 
 ## Buenas prácticas de dashboard
 
@@ -40,5 +84,5 @@ Metabase es el contenedor de BI ligero del stack de Monotickets. Permite explora
 
 ## Próximos pasos
 
-- Automatiza la creación de dashboards mediante la API de Metabase cuando las tarjetas cambien con frecuencia.
+- Regenera los dashboards automáticamente cada vez que cambien las tarjetas base ejecutando nuevamente `npm run setup:metabase` (o re-lanzando el job de CI manualmente).
 - Para análisis ejecutivos considera compartir vistas de `mv_event_mix_90d` y `mv_organizer_debt` en dashboards dedicados (ver `docs/bi/metabase-dashboards.md`).
