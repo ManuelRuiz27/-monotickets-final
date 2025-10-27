@@ -224,10 +224,15 @@ export function createDeliveryModule(options = {}) {
       throw error;
     }
 
-    await recordJobQueued(request.id, job.id, {
-      isFree: isFreeSession,
-      sessionId: activeSessionId,
-    });
+    await recordJobQueued(
+      request.id,
+      job.id,
+      {
+        isFree: isFreeSession,
+        sessionId: activeSessionId,
+      },
+      env,
+    );
 
     log({
       level: 'info',
@@ -572,7 +577,7 @@ async function findActiveWhatsappSession(phone) {
   }
 }
 
-  async function recordJobQueued(requestId, jobId, { isFree = false, sessionId = null } = {}) {
+  async function recordJobQueued(requestId, jobId, { isFree = false, sessionId = null } = {}, env = process.env) {
     await query(
       `
         UPDATE delivery_requests
