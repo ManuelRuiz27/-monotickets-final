@@ -15,17 +15,19 @@ on:
 jobs:
   build-and-up:
     runs-on: ubuntu-latest
+    env:
+      COMPOSE_PROFILES: dev
     steps:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Pull images
-        run: docker compose pull || true
+        run: docker compose --profile "$COMPOSE_PROFILES" pull || true
       - name: Build test container
         run: docker compose build tests
       - name: Start services
-        run: docker compose up -d database redis backend-api dashboard pwa
+        run: docker compose --profile "$COMPOSE_PROFILES" up -d database redis backend-api dashboard pwa
       - name: Wait for readiness
         run: |
           set -o pipefail
@@ -50,11 +52,13 @@ jobs:
           path: reports/smoke
       - name: Tear down services
         if: always()
-        run: docker compose down
+        run: docker compose --profile "$COMPOSE_PROFILES" down
 
   tests-e2e:
     runs-on: ubuntu-latest
     needs: build-and-up
+    env:
+      COMPOSE_PROFILES: dev
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -63,7 +67,7 @@ jobs:
       - name: Build test container
         run: docker compose build tests
       - name: Start dependencies
-        run: docker compose up -d database redis backend-api dashboard pwa
+        run: docker compose --profile "$COMPOSE_PROFILES" up -d database redis backend-api dashboard pwa
       - name: Wait for readiness
         run: |
           set -o pipefail
@@ -109,4 +113,4 @@ jobs:
           path: reports/smoke
       - name: Tear down services
         if: always()
-        run: docker compose down
+        run: docker compose --profile "$COMPOSE_PROFILES" down
