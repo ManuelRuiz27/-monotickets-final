@@ -28,6 +28,10 @@ This document summarises the workflow topology and required secrets.
 | `TESTSPRITE_API_KEY` | CI | API key for TestSprite smoke tests. |
 | `REGISTRY_URL`, `REGISTRY_USERNAME`, `REGISTRY_PASSWORD` | Build & Push, Deploy | Registry endpoint and credentials. |
 | `SSH_HOST`, `SSH_USER`, `SSH_KEY` | Deploy Staging | SSH details for the staging host. |
+| `STAGING_DB_HOST`, `STAGING_DB_PORT`, `STAGING_DB_NAME`, `STAGING_DB_USER`, `STAGING_DB_PASSWORD` | Build & Push, Deploy | PostgreSQL connection for applying migrations, refreshing KPI views and verifying `pg_cron`. |
+| `METABASE_SITE_URL`, `METABASE_DATABASE_ID`, `METABASE_ORGANIZER_GROUP_ID`, `METABASE_DIRECTOR_GROUP_ID`, `METABASE_SESSION_TOKEN`, `METABASE_API_KEY` | Build & Push, Deploy | Credentials and metadata for automated Metabase dashboard sync. |
+| `STAGING_BACKEND_HEALTH_URL`, `STAGING_FRONTEND_HEALTH_URL` | Deploy Staging | Health endpoints used after rollout validation. |
+| `SCAN_LOG_RETENTION_DAYS` | Deploy (environment variables) | Controls retention window for log partition maintenance jobs. |
 | `SUPABASE_URL`, `SUPABASE_KEY`, `REDIS_URL_STAGING`, `R2_*`, `CLOUDFLARE_API_TOKEN` | Deploy (environment variables) | Passed to the staging host for runtime configuration. |
 
 Refer to `docs/secrets-setup.md` for CLI commands to seed these values.

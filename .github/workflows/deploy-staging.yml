@@ -91,6 +91,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
       - name: Prepare SSH key
         env:
           SSH_KEY: ${{ secrets.SSH_KEY }}
@@ -109,6 +120,64 @@ jobs:
           REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
           IMAGE_TAG: ${{ steps.meta.outputs.image_tag }}
         run: ./infra/scripts/deploy_staging.sh
+
+      - name: Apply database migrations
+        env:
+          DB_HOST: ${{ secrets.STAGING_DB_HOST }}
+          DB_PORT: ${{ secrets.STAGING_DB_PORT }}
+          DB_USER: ${{ secrets.STAGING_DB_USER }}
+          DB_NAME: ${{ secrets.STAGING_DB_NAME }}
+          DB_PASSWORD: ${{ secrets.STAGING_DB_PASSWORD }}
+        run: ./infra/scripts/apply-migrations.sh
+
+      - name: Refresh staging KPI views
+        env:
+          DB_HOST: ${{ secrets.STAGING_DB_HOST }}
+          DB_PORT: ${{ secrets.STAGING_DB_PORT }}
+          DB_USER: ${{ secrets.STAGING_DB_USER }}
+          DB_NAME: ${{ secrets.STAGING_DB_NAME }}
+          PGPASSWORD: ${{ secrets.STAGING_DB_PASSWORD }}
+        run: ./infra/refresh-bi-views.sh
+
+      - name: Update Metabase dashboards
+        env:
+          METABASE_SITE_URL: ${{ secrets.METABASE_SITE_URL }}
+          METABASE_SESSION_TOKEN: ${{ secrets.METABASE_SESSION_TOKEN }}
+          METABASE_API_KEY: ${{ secrets.METABASE_API_KEY }}
+          METABASE_DATABASE_ID: ${{ secrets.METABASE_DATABASE_ID }}
+          METABASE_ORGANIZER_GROUP_ID: ${{ secrets.METABASE_ORGANIZER_GROUP_ID }}
+          METABASE_DIRECTOR_GROUP_ID: ${{ secrets.METABASE_DIRECTOR_GROUP_ID }}
+        run: npm run setup:metabase
+
+      - name: Verify backend health
+        env:
+          HEALTH_URL: ${{ secrets.STAGING_BACKEND_HEALTH_URL }}
+        run: curl -fsS "$HEALTH_URL"
+
+      - name: Verify frontend health
+        env:
+          HEALTH_URL: ${{ secrets.STAGING_FRONTEND_HEALTH_URL }}
+        run: curl -fsS "$HEALTH_URL"
+
+      - name: Verify pg_cron refresh jobs
+        env:
+          DB_HOST: ${{ secrets.STAGING_DB_HOST }}
+          DB_PORT: ${{ secrets.STAGING_DB_PORT }}
+          DB_USER: ${{ secrets.STAGING_DB_USER }}
+          DB_NAME: ${{ secrets.STAGING_DB_NAME }}
+          PGPASSWORD: ${{ secrets.STAGING_DB_PASSWORD }}
+        run: |
+          set -euo pipefail
+          job_id=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "SELECT jobid FROM cron.job WHERE command ILIKE '%mv_wa_free_ratio_daily%' LIMIT 1")
+          if [[ -z "$job_id" ]]; then
+            echo "No pg_cron job found for mv_wa_free_ratio_daily" >&2
+            exit 1
+          fi
+          last_success=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "SELECT success FROM cron.job_run_details WHERE jobid = $job_id ORDER BY start_time DESC LIMIT 1")
+          if [[ "$last_success" != "t" ]]; then
+            echo "Latest pg_cron execution for job $job_id did not succeed" >&2
+            exit 1
+          fi
 
       - name: Deployment summary
         run: echo "Deployed image tag ${{ steps.meta.outputs.image_tag }} to staging (branch ${{ steps.meta.outputs.branch }})."

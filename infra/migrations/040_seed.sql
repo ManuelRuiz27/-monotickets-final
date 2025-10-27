@@ -340,6 +340,58 @@ delivery_insert AS (
     LEFT JOIN wa_session_seed ws ON ws.phone = dp.normalized_phone
     RETURNING *
 ),
+wa_ratio_source AS (
+    SELECT
+        ge.organizer_id,
+        ge.event_id,
+        ge.id AS guest_id,
+        ws.id AS session_id
+    FROM guest_enriched ge
+    JOIN wa_session_seed ws
+      ON ws.phone = regexp_replace(ge.phone, '\\D', '', 'g')
+    WHERE ge.status IN ('confirmed', 'pending')
+    ORDER BY ge.guest_seq
+    LIMIT 1
+),
+wa_ratio_samples AS (
+    SELECT
+        src.organizer_id,
+        src.event_id,
+        src.guest_id,
+        src.session_id,
+        sample.seq,
+        sample.is_free,
+        sample.status,
+        date_trunc('day', now()) + interval '8 hours' + (sample.seq * interval '30 minutes') AS created_at
+    FROM wa_ratio_source src
+    JOIN LATERAL (
+        VALUES
+            (0, true, 'delivered'),
+            (1, true, 'sent'),
+            (2, false, 'delivered'),
+            (3, false, 'failed'),
+            (4, true, 'queued')
+    ) AS sample(seq, is_free, status) ON TRUE
+),
+wa_ratio_seed AS (
+    INSERT INTO delivery_logs (organizer_id, event_id, guest_id, channel, template, status, is_free, session_id, provider_ref, metadata, error, created_at, updated_at)
+    SELECT
+        sample.organizer_id,
+        sample.event_id,
+        sample.guest_id,
+        'whatsapp' AS channel,
+        CASE WHEN sample.seq % 2 = 0 THEN 'session_followup' ELSE 'wa_ratio_probe' END AS template,
+        sample.status,
+        sample.is_free,
+        CASE WHEN sample.is_free THEN sample.session_id ELSE NULL END AS session_id,
+        format('wa-ratio-%s', sample.seq) AS provider_ref,
+        jsonb_build_object('seed', true, 'ratio_seq', sample.seq) AS metadata,
+        NULL::jsonb AS error,
+        sample.created_at,
+        sample.created_at + interval '15 minutes' AS updated_at
+    FROM wa_ratio_samples sample
+    RETURNING *
+),
 ledger_blueprint AS (
     SELECT
         o.id AS organizer_id,
@@ -426,6 +478,7 @@ SELECT
     (SELECT COUNT(*) FROM guest_insert) AS guests_inserted,
     (SELECT COUNT(*) FROM invite_insert) AS invites_inserted,
     (SELECT COUNT(*) FROM delivery_insert) AS delivery_logs_inserted,
+    (SELECT COUNT(*) FROM wa_ratio_seed) AS wa_ratio_samples,
     (SELECT COUNT(*) FROM scan_logs) AS total_scan_logs,
     (SELECT COUNT(*) FROM ledger_insert) AS ledger_rows,
     (SELECT COUNT(*) FROM payments_insert) AS payments_rows;

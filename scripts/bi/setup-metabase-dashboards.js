@@ -12,6 +12,7 @@ const DATABASE_ID = env.METABASE_DATABASE_ID;
 const ORGANIZER_GROUP_ID = env.METABASE_ORGANIZER_GROUP_ID;
 const DIRECTOR_GROUP_ID = env.METABASE_DIRECTOR_GROUP_ID;
 const PARENT_COLLECTION_NAME = env.METABASE_COLLECTION_NAME || 'Monotickets – Dashboards';
+const API_KEY = env.METABASE_API_KEY || null;
 
 if (!SITE_URL) {
   console.error('Missing METABASE_SITE_URL environment variable.');
@@ -26,6 +27,10 @@ if (!DATABASE_ID) {
 let sessionToken = env.METABASE_SESSION_TOKEN || null;
 
 async function loginIfNeeded() {
+  if (API_KEY) {
+    console.log('Using Metabase API key authentication.');
+    return;
+  }
   if (sessionToken) {
     return;
   }
@@ -57,8 +62,12 @@ async function fetchJson(path, options = {}) {
   const url = `${SITE_URL}${path}`;
 
   const finalHeaders = { ...headers };
-  if (authenticate && sessionToken) {
-    finalHeaders['X-Metabase-Session'] = sessionToken;
+  if (authenticate) {
+    if (API_KEY) {
+      finalHeaders['X-API-Key'] = API_KEY;
+    } else if (sessionToken) {
+      finalHeaders['X-Metabase-Session'] = sessionToken;
+    }
   }
   let payload;
   if (body !== undefined) {
