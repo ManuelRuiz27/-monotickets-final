@@ -54,6 +54,62 @@
           }
         },
         "gridPos": { "h": 6, "w": 8, "x": 0, "y": 10 }
+      },
+      {
+        "type": "timeseries",
+        "title": "Queue backlog (jobs)",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "PROMETHEUS_DS"
+        },
+        "targets": [
+          {
+            "expr": "queue_backlog{queue=~\"wa_outbound|wa_inbound|payments\"}",
+            "legendFormat": "{{queue}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "green", "value": null },
+                { "color": "orange", "value": 50 },
+                { "color": "red", "value": 100 }
+              ]
+            }
+          }
+        },
+        "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 }
+      },
+      {
+        "type": "timeseries",
+        "title": "Queue failures (5m increase)",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "PROMETHEUS_DS"
+        },
+        "targets": [
+          {
+            "expr": "increase(jobs_failed_total{queue=~\"wa_outbound|wa_inbound|payments\"}[5m])",
+            "legendFormat": "{{queue}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "green", "value": null },
+                { "color": "orange", "value": 1 },
+                { "color": "red", "value": 5 }
+              ]
+            }
+          }
+        },
+        "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 }
       }
     ]
   }

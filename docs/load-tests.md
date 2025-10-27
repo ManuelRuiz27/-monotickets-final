@@ -28,8 +28,8 @@ before major releases.
 
 - `/scan/validate` p95 latency < **300 ms** and p99 < **500 ms** during the test.
 - No more than **2%** HTTP 5xx responses.
-- Worker dead-letter queue (DLQ) remains < **10** jobs (monitor via Redis or
-  upcoming BullMQ dashboards).
+- Worker dead-letter queue (DLQ) remains < **10** jobs (monitor with
+  `queue_backlog{queue="delivery_failed"}` from the backend metrics endpoint).
 
 ## Observability during the test
 
@@ -42,6 +42,12 @@ before major releases.
   histogram_quantile(0.95, sum(rate(http_request_duration_ms_bucket[1m])) by (le, path))
   ```
 - Export metrics snapshots at the end of the run for historical comparison.
+- Keep a background poll (2 s interval) on the queue backlog to ensure DLQ
+  headroom:
+  ```bash
+  watch -n2 'curl -s http://backend-api:8080/metrics | grep "queue_backlog{queue=\"delivery_failed\"}"'
+  ```
+  The value should remain below `10` throughout the load test.
 
 ## Post-test checklist
 
