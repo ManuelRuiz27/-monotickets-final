@@ -1,4 +1,7 @@
+'use client';
+
 import { handleError } from '@shared/api/errors';
+import { getSession } from '../auth/session';
 
 export type PaymentStatus = 'pending' | 'paid' | 'failed';
 
@@ -210,25 +213,28 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     return mockRequest<T>(path, init);
   }
 
-  try {
-    const res = await fetch(`${API_BASE}${path}`, {
-      ...init,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(init?.headers ?? {}),
-      },
-      cache: 'no-store',
-    });
-    if (!res.ok) {
-      await handleError(res, { scope: 'director-api', request: path });
-    }
-    return res.json() as Promise<T>;
-  } catch (error) {
-    if (process.env.NODE_ENV !== 'production') {
-      console.warn('[director-api] usando datos mock para', path, error);
-    }
-    return mockRequest<T>(path, init);
+  const session = getSession();
+  const headers = new Headers(init?.headers ?? {});
+  headers.set('Content-Type', 'application/json');
+  if (session?.accessToken) {
+    headers.set('Authorization', `Bearer ${session.accessToken}`);
   }
+  if (session?.staffToken) {
+    headers.set('x-staff-token', session.staffToken);
+  }
+
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    headers,
+    credentials: 'include',
+    cache: 'no-store',
+  });
+
+  if (!res.ok) {
+    await handleError(res, { scope: 'director-api', request: path });
+  }
+
+  return res.json() as Promise<T>;
 }
 
 function mockRequest<T>(path: string, init?: RequestInit): T {
