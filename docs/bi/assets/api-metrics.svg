@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 512" role="img" aria-labelledby="title desc">
+  <title id="title">Mock output for /metrics endpoint</title>
+  <desc id="desc">Placeholder capture summarizing the Prometheus exposition format for queue metrics.</desc>
+  <rect x="0" y="0" width="1024" height="512" fill="#111827" />
+  <text x="40" y="80" font-family="'Fira Code', monospace" font-size="28" fill="#f8fafc">$ curl http://localhost:8080/metrics</text>
+  <text x="40" y="140" font-family="'Fira Code', monospace" font-size="24" fill="#e2e8f0"># HELP queue_backlog Number of waiting and delayed jobs per queue</text>
+  <text x="40" y="180" font-family="'Fira Code', monospace" font-size="24" fill="#e2e8f0">queue_backlog{queue="wa_outbound"} 12</text>
+  <text x="40" y="220" font-family="'Fira Code', monospace" font-size="24" fill="#e2e8f0">queue_backlog{queue="wa_inbound"} 3</text>
+  <text x="40" y="260" font-family="'Fira Code', monospace" font-size="24" fill="#e2e8f0">queue_backlog{queue="payments"} 1</text>
+  <text x="40" y="320" font-family="'Fira Code', monospace" font-size="24" fill="#cbd5f5">jobs_processed_total{queue="wa_outbound"} 1520</text>
+  <text x="40" y="360" font-family="'Fira Code', monospace" font-size="24" fill="#cbd5f5">jobs_failed_total{queue="wa_outbound"} 9</text>
+  <text x="40" y="400" font-family="'Fira Code', monospace" font-size="24" fill="#f59e0b"># HELP http_request_duration_ms HTTP request duration histogram</text>
+</svg>
