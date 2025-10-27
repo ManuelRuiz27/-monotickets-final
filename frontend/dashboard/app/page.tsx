@@ -9,8 +9,8 @@ export default function DashboardLandingPage() {
       <article style={cardStyle}>
         <h2 style={titleStyle}>Elige una vista</h2>
         <p style={bodyStyle}>
-          Esta demo carga datos de semillas locales para simular el comportamiento del panel. No se realizan llamadas a
-          servicios externos.
+          Inicia sesión para navegar el panel conectado al backend real de Monotickets. Las métricas y acciones utilizan la API
+          compartida con producción.
         </p>
         <div style={ctaGroupStyle} role="navigation" aria-label="Vistas disponibles">
           <Link href="/director" style={primaryCtaStyle}>
@@ -18,6 +18,9 @@ export default function DashboardLandingPage() {
           </Link>
           <Link href="/organizer" style={secondaryCtaStyle}>
             Panel del organizador
+          </Link>
+          <Link href="/login" style={secondaryCtaStyle}>
+            Iniciar sesión
           </Link>
         </div>
       </article>

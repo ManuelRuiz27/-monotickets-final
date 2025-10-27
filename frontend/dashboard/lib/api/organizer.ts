@@ -1,5 +1,8 @@
+'use client';
+
 import type { GuestModel, GuestStatus, EventStatus, LandingKind } from '@shared/models/delivery';
 import { handleError } from '@shared/api/errors';
+import { getSession } from '../auth/session';
 
 export type { GuestStatus, EventStatus, LandingKind };
 
@@ -187,29 +190,30 @@ async function request<T>(input: RequestInfo | URL, init?: RequestInit): Promise
     return mockRequest<T>(input, init);
   }
 
-  try {
-    const url = typeof input === 'string' ? `${API_BASE}${input}` : input;
-    const res = await fetch(url, {
-      ...init,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(init?.headers ?? {}),
-      },
-      cache: 'no-store',
-    });
-    if (!res.ok) {
-      await handleError(res, {
-        scope: 'organizer-api',
-        request: typeof input === 'string' ? input : input.toString(),
-      });
-    }
-    return res.json() as Promise<T>;
-  } catch (error) {
-    if (process.env.NODE_ENV !== 'production') {
-      console.warn('[organizer-api] usando datos mock para', input, error);
-    }
-    return mockRequest<T>(input, init);
+  const session = getSession();
+  const target = typeof input === 'string' ? `${API_BASE}${input}` : input;
+  const headers = new Headers(init?.headers ?? {});
+  headers.set('Content-Type', 'application/json');
+  if (session?.accessToken) {
+    headers.set('Authorization', `Bearer ${session.accessToken}`);
   }
+  if (session?.staffToken) {
+    headers.set('x-staff-token', session.staffToken);
+  }
+
+  const res = await fetch(target, {
+    ...init,
+    headers,
+    credentials: 'include',
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    await handleError(res, {
+      scope: 'organizer-api',
+      request: typeof input === 'string' ? input : input.toString(),
+    });
+  }
+  return res.json() as Promise<T>;
 }
 
 function mockRequest<T>(input: RequestInfo | URL, init?: RequestInit): T {
