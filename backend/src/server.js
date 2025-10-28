@@ -21,14 +21,15 @@ import { createErrorInterceptor } from './http/error-interceptor.js';
 import { query, withDbClient } from './db/index.js';
 import { ensureRedis } from './redis/client.js';
 import { hitRateLimit } from './lib/rate-limit.js';
+import {
+  incrementQueueFailures,
+  incrementQueueProcessed,
+  observeHttpDuration,
+  renderMetrics,
+  updateQueueBacklog,
+} from './metrics/registry.js';
 
 const DEFAULT_APP_ENV = 'development';
-const HISTOGRAM_BUCKETS = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000];
-const metricsRegistry = new Map();
-const requestTotals = new Map();
-const queueBacklogGauge = new Map();
-const queueFailuresCounter = new Map();
-const queueProcessedCounter = new Map();
 const APP_VERSION = packageJson.version || '0.0.0';
 const APP_BOOT_TIME_MS = Date.now();
 const DEFAULT_GUEST_LIST_LIMIT = 50;
@@ -60,114 +61,6 @@ const SCAN_VALIDATE_INVITE_QUERY = {
           WHERE invites.code = $1 AND invites.event_id = $2
           LIMIT 1`,
 };
-
-function observeHttpDuration({ method, route, status, durationMs }) {
-  const key = `${method.toUpperCase()}::${status}::${route}`;
-  if (!metricsRegistry.has(key)) {
-    metricsRegistry.set(key, {
-      count: 0,
-      sum: 0,
-      buckets: new Array(HISTOGRAM_BUCKETS.length + 1).fill(0),
-    });
-  }
-
-  const metric = metricsRegistry.get(key);
-  metric.count += 1;
-  metric.sum += durationMs;
-
-  const bucketIndex = HISTOGRAM_BUCKETS.findIndex((boundary) => durationMs <= boundary);
-  if (bucketIndex === -1) {
-    metric.buckets[HISTOGRAM_BUCKETS.length] += 1;
-  } else {
-    metric.buckets[bucketIndex] += 1;
-  }
-
-  const totalKey = `${method.toUpperCase()}::${status}::${route}`;
-  const current = requestTotals.get(totalKey) || 0;
-  requestTotals.set(totalKey, current + 1);
-}
-
-function renderMetrics() {
-  const lines = [
-    '# HELP http_request_duration_ms HTTP request duration in milliseconds.',
-    '# TYPE http_request_duration_ms histogram',
-  ];
-
-  for (const [key, metric] of metricsRegistry.entries()) {
-    const [method, status, route] = key.split('::');
-    let cumulative = 0;
-    HISTOGRAM_BUCKETS.forEach((boundary, index) => {
-      cumulative += metric.buckets[index];
-      lines.push(
-        `http_request_duration_ms_bucket{le="${boundary}",method="${method}",route="${route}",status="${status}"} ${cumulative}`,
-      );
-    });
-    cumulative += metric.buckets[HISTOGRAM_BUCKETS.length];
-    lines.push(
-      `http_request_duration_ms_bucket{le="+Inf",method="${method}",route="${route}",status="${status}"} ${cumulative}`,
-    );
-    lines.push(`http_request_duration_ms_sum{method="${method}",route="${route}",status="${status}"} ${metric.sum}`);
-    lines.push(`http_request_duration_ms_count{method="${method}",route="${route}",status="${status}"} ${metric.count}`);
-  }
-
-  if (requestTotals.size > 0) {
-    lines.push('# HELP http_requests_total Total HTTP requests processed.');
-    lines.push('# TYPE http_requests_total counter');
-    for (const [key, value] of requestTotals.entries()) {
-      const [method, status, route] = key.split('::');
-      lines.push(`http_requests_total{method="${method}",route="${route}",status="${status}"} ${value}`);
-    }
-  }
-
-  if (queueBacklogGauge.size > 0) {
-    lines.push('# HELP queue_backlog Pending jobs in queue (waiting + delayed).');
-    lines.push('# TYPE queue_backlog gauge');
-    for (const [queue, pending] of queueBacklogGauge.entries()) {
-      lines.push(`queue_backlog{queue="${queue}"} ${pending}`);
-    }
-  }
-
-  if (queueFailuresCounter.size > 0) {
-    lines.push('# HELP jobs_failed_total Total number of failed queue jobs.');
-    lines.push('# TYPE jobs_failed_total counter');
-    for (const [queue, total] of queueFailuresCounter.entries()) {
-      lines.push(`jobs_failed_total{queue="${queue}"} ${total}`);
-    }
-  }
-
-  if (queueProcessedCounter.size > 0) {
-    lines.push('# HELP jobs_processed_total Total number of completed queue jobs.');
-    lines.push('# TYPE jobs_processed_total counter');
-    for (const [queue, total] of queueProcessedCounter.entries()) {
-      lines.push(`jobs_processed_total{queue="${queue}"} ${total}`);
-    }
-  }
-
-  return `${lines.join('\n')}\n`;
-}
-
-function incrementQueueFailures(queue) {
-  const current = queueFailuresCounter.get(queue) || 0;
-  queueFailuresCounter.set(queue, current + 1);
-}
-
-function incrementQueueProcessed(queue) {
-  const current = queueProcessedCounter.get(queue) || 0;
-  queueProcessedCounter.set(queue, current + 1);
-}
-
-function updateQueueBacklog(snapshot = []) {
-  const seen = new Set();
-  snapshot.forEach(({ label, waiting = 0, delayed = 0 }) => {
-    seen.add(label);
-    queueBacklogGauge.set(label, Number(waiting || 0) + Number(delayed || 0));
-  });
-  for (const label of Array.from(queueBacklogGauge.keys())) {
-    if (!seen.has(label)) {
-      queueBacklogGauge.delete(label);
-    }
-  }
-}
 
 export function createServer(options = {}) {
   const { env = process.env } = options;
@@ -224,7 +117,8 @@ export function createServer(options = {}) {
     try {
       if (method === 'GET' && url.pathname === '/metrics') {
         res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4' });
-        res.end(renderMetrics());
+        const payload = await renderMetrics();
+        res.end(payload);
         return;
       }
 

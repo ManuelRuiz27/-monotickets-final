@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node --watch src/index.js",
     "start": "node src/index.js",
+    "start:cluster": "node src/index.cluster.js",
     "start:worker": "node src/worker.js",
     "lint": "node scripts/lint-placeholder.js",
     "test": "node --test",
