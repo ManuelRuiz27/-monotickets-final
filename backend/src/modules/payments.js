@@ -1,8 +1,27 @@
 import { randomUUID } from 'node:crypto';
 
 import { query } from '../db/index.js';
+import { z } from '../lib/zod-lite.js';
+import { buildValidationError } from '../lib/validation.js';
 
 const SUPPORTED_PROVIDERS = new Set(['stripe', 'conekta', 'mock']);
+
+const createIntentSchema = z
+  .object({
+    amount: z.number().coerce().refine((value) => value > 0, 'invalid_amount'),
+    currency: z.string().trim().min(1).optional(),
+    eventId: z.string().trim().min(1).optional(),
+    organizerId: z.string().trim().min(1).optional(),
+    provider: z.string().trim().min(1).optional(),
+    metadata: z.record(z.any()).optional(),
+  })
+  .strip();
+
+const paymentsWebhookBodySchema = z
+  .object({
+    provider: z.string().trim().min(1).optional(),
+  })
+  .passthrough();
 
 export function createPaymentsModule(options = {}) {
   const { env = process.env, queuesPromise, logger } = options;
@@ -12,12 +31,18 @@ export function createPaymentsModule(options = {}) {
   const log = logger || ((payload) => console.log(JSON.stringify(payload)));
 
   async function createIntent({ body = {}, requestId }) {
-    const amount = Number(body.amount || 0);
-    const currency = (body.currency || 'mxn').toLowerCase();
-    const eventId = body.eventId || null;
-    const organizerId = body.organizerId || env.DEFAULT_ORGANIZER_ID || null;
-    const provider = selectProvider(body.provider || env.PAYMENTS_PROVIDER || 'mock');
-    const metadata = { ...(body.metadata || {}) };
+    const parsed = createIntentSchema.safeParse(body || {});
+    if (!parsed.success) {
+      return buildValidationError(parsed.error);
+    }
+
+    const input = parsed.data;
+    const amount = Number(input.amount || 0);
+    const currency = (input.currency || 'mxn').toLowerCase();
+    const eventId = input.eventId || null;
+    const organizerId = input.organizerId || env.DEFAULT_ORGANIZER_ID || null;
+    const provider = selectProvider(input.provider || env.PAYMENTS_PROVIDER || 'mock');
+    const metadata = { ...(input.metadata || {}) };
 
     if (!Number.isFinite(amount) || amount <= 0) {
       return {
@@ -95,12 +120,18 @@ export function createPaymentsModule(options = {}) {
   }
 
   async function enqueueWebhook({ body = {}, headers = {}, requestId }) {
+    const parsed = paymentsWebhookBodySchema.safeParse(body || {});
+    if (!parsed.success) {
+      return buildValidationError(parsed.error);
+    }
+
+    const input = parsed.data;
     const queues = await queuesPromise;
-    const provider = selectProvider(body?.provider || env.PAYMENTS_PROVIDER || 'mock');
+    const provider = selectProvider(input?.provider || env.PAYMENTS_PROVIDER || 'mock');
     const jobPayload = {
       webhookId: randomUUID(),
       provider,
-      payload: body,
+      payload: input,
       headers,
       receivedAt: new Date().toISOString(),
       requestId,

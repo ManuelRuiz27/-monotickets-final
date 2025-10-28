@@ -21,6 +21,8 @@ import { createErrorInterceptor } from './http/error-interceptor.js';
 import { query, withDbClient } from './db/index.js';
 import { ensureRedis } from './redis/client.js';
 import { hitRateLimit } from './lib/rate-limit.js';
+import { z } from './lib/zod-lite.js';
+import { buildValidationError } from './lib/validation.js';
 import {
   incrementQueueFailures,
   incrementQueueProcessed,
@@ -53,6 +55,54 @@ const MIN_SCAN_VALID_CACHE_TTL_SECONDS = 60;
 const MAX_SCAN_VALID_CACHE_TTL_SECONDS = 300;
 const DEFAULT_SCAN_VALID_CACHE_TTL_SECONDS = 180;
 
+const optionalIdentifierSchema = z.string().trim().min(1).optional();
+const waWebhookSchema = z.object({}).passthrough();
+const scanValidateSchema = z
+  .object({
+    code: z.string().trim().min(1),
+    eventId: z.string().trim().min(1).optional(),
+    event_id: z.string().trim().min(1).optional(),
+    staffToken: z.string().trim().min(1).optional(),
+    device: z.record(z.any()).optional(),
+  })
+  .strip();
+
+const loginSchema = z
+  .object({
+    userId: z.string().trim().min(1),
+    role: z
+      .string()
+      .trim()
+      .toLowerCase()
+      .refine((value) => ['admin', 'director', 'organizer', 'staff', 'viewer'].includes(value), 'invalid_role')
+      .optional(),
+  })
+  .strip();
+
+const guestsQuerySchema = z
+  .object({
+    eventId: optionalIdentifierSchema,
+    limit: z
+      .number()
+      .coerce()
+      .int()
+      .refine((value) => value > 0 && value <= MAX_GUEST_LIST_LIMIT, 'invalid_limit')
+      .optional(),
+    offset: z
+      .number()
+      .coerce()
+      .int()
+      .refine((value) => value >= 0, 'invalid_offset')
+      .optional(),
+    status: z
+      .string()
+      .trim()
+      .toLowerCase()
+      .refine((value) => ALLOWED_GUEST_STATUSES.has(value), 'invalid_status')
+      .optional(),
+  })
+  .strip();
+
 const SCAN_VALIDATE_INVITE_QUERY = {
   name: 'scan_validate_invite_v1',
   text: `SELECT invites.id AS invite_id, invites.guest_id, guests.status, guests.event_id
@@ -84,6 +134,7 @@ export function createServer(options = {}) {
   const scanRequireAuthFlag = String(env.SCAN_REQUIRE_AUTH || '').toLowerCase();
   const requireScanAuth = ['1', 'true', 'yes', 'on'].includes(scanRequireAuthFlag);
   const scanValidCacheTtlSeconds = resolveScanValidCacheTtlSeconds(env);
+  const corsConfig = resolveCorsConfig(env);
 
   attachQueueObservers(queuesPromise, logger, env, serviceName);
 
@@ -91,6 +142,7 @@ export function createServer(options = {}) {
     const startedAt = process.hrtime.bigint();
     let requestId = req.headers[correlationHeaderLower] || randomUUID();
     res.setHeader(correlationHeader, requestId);
+    applySecurityHeaders({ req, res, corsConfig, env });
     const url = new URL(req.url, `http://${req.headers.host}`);
     const method = req.method ?? 'GET';
     const requestContext = { eventId: undefined };
@@ -108,6 +160,11 @@ export function createServer(options = {}) {
     if (middlewareContext.requestId && middlewareContext.requestId !== requestId) {
       requestId = middlewareContext.requestId;
       res.setHeader(correlationHeader, requestId);
+    }
+    if (method === 'OPTIONS') {
+      res.writeHead(204);
+      res.end();
+      return;
     }
     let auth = middlewareContext.auth || { user: null, error: 'missing_token', token: null };
     const clientFingerprint = getClientFingerprint(req);
@@ -215,9 +272,14 @@ export function createServer(options = {}) {
         }
 
         const body = await readJsonBody(req, logger);
+        const parsedWebhook = waWebhookSchema.safeParse(body || {});
+        if (!parsedWebhook.success) {
+          const validation = buildValidationError(parsedWebhook.error);
+          return sendJson(res, validation.statusCode, { ...validation.payload, requestId });
+        }
         try {
           const queues = await queuesPromise;
-          const payload = typeof body === 'object' && body !== null ? body : {};
+          const payload = parsedWebhook.data;
           const job = queues.waInboundQueue
             ? await queues.waInboundQueue.add('wa:webhook', {
                 payload,
@@ -745,27 +807,23 @@ export function createServer(options = {}) {
       }
 
       if (method === 'GET' && url.pathname === '/guests') {
-        const eventIdParam = url.searchParams.get('eventId');
-        const { value: limit, error: limitError } = parseGuestLimitParam(
-          url.searchParams.get('limit'),
-        );
-        if (limitError) {
-          return sendJson(res, 400, { error: limitError, requestId });
+        const searchInput = Object.fromEntries(url.searchParams.entries());
+        const parsedQuery = guestsQuerySchema.safeParse({
+          eventId: searchInput.eventId,
+          limit: searchInput.limit,
+          offset: searchInput.offset,
+          status: searchInput.status,
+        });
+        if (!parsedQuery.success) {
+          const validation = buildValidationError(parsedQuery.error);
+          return sendJson(res, validation.statusCode, { ...validation.payload, requestId });
         }
 
-        const { value: offset, error: offsetError } = parseGuestOffsetParam(
-          url.searchParams.get('offset'),
-        );
-        if (offsetError) {
-          return sendJson(res, 400, { error: offsetError, requestId });
-        }
-
-        const { value: statusFilter, error: statusError } = parseGuestStatusParam(
-          url.searchParams.get('status'),
-        );
-        if (statusError) {
-          return sendJson(res, 400, { error: statusError, requestId });
-        }
+        const queryData = parsedQuery.data;
+        const eventIdParam = queryData.eventId ?? null;
+        const limit = queryData.limit ?? DEFAULT_GUEST_LIST_LIMIT;
+        const offset = queryData.offset ?? 0;
+        const statusFilter = queryData.status ?? null;
 
         if (!allowAnonymousGuestAccess) {
           if (
@@ -842,30 +900,31 @@ export function createServer(options = {}) {
           );
         }
         const [, , requestedEventId] = url.pathname.split('/');
-        const { value: limit, error: limitError } = parseGuestLimitParam(
-          url.searchParams.get('limit'),
-        );
-        if (limitError) {
-          return sendJson(res, 400, { error: limitError, requestId });
+        const normalizedEventId = typeof requestedEventId === 'string' ? requestedEventId.trim() : '';
+        if (!normalizedEventId) {
+          return sendJson(res, 400, { error: 'event_id_required', requestId });
         }
 
-        const { value: offset, error: offsetError } = parseGuestOffsetParam(
-          url.searchParams.get('offset'),
-        );
-        if (offsetError) {
-          return sendJson(res, 400, { error: offsetError, requestId });
+        const searchInput = Object.fromEntries(url.searchParams.entries());
+        const parsedQuery = guestsQuerySchema.safeParse({
+          eventId: searchInput.eventId,
+          limit: searchInput.limit,
+          offset: searchInput.offset,
+          status: searchInput.status,
+        });
+        if (!parsedQuery.success) {
+          const validation = buildValidationError(parsedQuery.error);
+          return sendJson(res, validation.statusCode, { ...validation.payload, requestId });
         }
 
-        const { value: statusFilter, error: statusError } = parseGuestStatusParam(
-          url.searchParams.get('status'),
-        );
-        if (statusError) {
-          return sendJson(res, 400, { error: statusError, requestId });
-        }
+        const queryData = parsedQuery.data;
+        const limit = queryData.limit ?? DEFAULT_GUEST_LIST_LIMIT;
+        const offset = queryData.offset ?? 0;
+        const statusFilter = queryData.status ?? null;
 
         const guestsResult = await withDbClient((client) =>
           fetchGuests({
-            eventId: requestedEventId,
+            eventId: normalizedEventId,
             limit,
             offset,
             status: statusFilter,
@@ -877,7 +936,7 @@ export function createServer(options = {}) {
         if (!guestsResult.eventExists) {
           return sendJson(res, 404, { error: 'event_not_found', requestId });
         }
-        const payload = { eventId: requestedEventId, guests: guestsResult.guests };
+        const payload = { eventId: normalizedEventId, guests: guestsResult.guests };
         if (guestsResult.resolvedEventId) {
           payload.resolvedEventId = guestsResult.resolvedEventId;
         }
@@ -886,7 +945,13 @@ export function createServer(options = {}) {
 
       if (method === 'POST' && url.pathname === '/scan/validate') {
         const body = await readJsonBody(req, logger);
-        const fallbackToken = typeof body.staffToken === 'string' ? body.staffToken.trim() : '';
+        const parsedScan = scanValidateSchema.safeParse(body || {});
+        if (!parsedScan.success) {
+          const validation = buildValidationError(parsedScan.error);
+          return sendJson(res, validation.statusCode, { ...validation.payload, requestId });
+        }
+        const scanInput = parsedScan.data;
+        const fallbackToken = typeof scanInput.staffToken === 'string' ? scanInput.staffToken : '';
 
         if ((!auth.user || auth.error) && fallbackToken) {
           const fallbackAuth = authenticateRequest({
@@ -953,8 +1018,8 @@ export function createServer(options = {}) {
           );
         }
 
-        const code = typeof body.code === 'string' ? body.code.trim() : '';
-        const rawEventId = typeof body.eventId === 'string' ? body.eventId.trim() : '';
+        const code = scanInput.code;
+        const rawEventId = scanInput.eventId || scanInput.event_id || '';
         requestContext.eventId = rawEventId || undefined;
 
         if (!code || !rawEventId) {
@@ -1031,7 +1096,7 @@ export function createServer(options = {}) {
               eventId: resolvedEventId,
               guestId: cachedScannedInvite.guestId,
               result: 'duplicate',
-              device: body.device,
+              device: scanInput.device,
             });
           }
           const responseBody = { ...cachedScannedInvite.response, requestId };
@@ -1071,7 +1136,12 @@ export function createServer(options = {}) {
           const inviteResult = await query(SCAN_VALIDATE_INVITE_QUERY, [code, resolvedEventId]);
 
           if (inviteResult.rowCount === 0) {
-            await appendScanLog({ eventId: resolvedEventId, guestId: null, result: 'invalid', device: body.device });
+            await appendScanLog({
+              eventId: resolvedEventId,
+              guestId: null,
+              result: 'invalid',
+              device: scanInput.device,
+            });
             const responseBody = { error: 'invite_not_found', status: 'invalid', requestId };
             if (idempotencyCacheKey) {
               await cacheIdempotentResponse({
@@ -1092,7 +1162,7 @@ export function createServer(options = {}) {
               eventId: resolvedEventId,
               guestId: invite.guest_id,
               result: 'invalid',
-              device: body.device,
+              device: scanInput.device,
             });
             const responseBody = { error: 'guest_not_confirmed', status: 'invalid', requestId };
             if (idempotencyCacheKey) {
@@ -1113,7 +1183,7 @@ export function createServer(options = {}) {
               eventId: resolvedEventId,
               guestId: invite.guest_id,
               result: 'duplicate',
-              device: body.device,
+              device: scanInput.device,
             });
             await cacheScannedInvite({
               redis,
@@ -1149,7 +1219,7 @@ export function createServer(options = {}) {
             eventId: resolvedEventId,
             guestId: invite.guest_id,
             result: finalStatus === 'valid' ? 'valid' : 'duplicate',
-            device: body.device,
+            device: scanInput.device,
           });
 
           if (finalStatus === 'valid' || finalStatus === 'duplicate') {
@@ -1189,12 +1259,14 @@ export function createServer(options = {}) {
 
       if (method === 'POST' && url.pathname === '/auth/login') {
         const body = await readJsonBody(req, logger);
-        const userId = typeof body.userId === 'string' ? body.userId.trim() : '';
-        const role = typeof body.role === 'string' ? body.role.trim() : 'viewer';
-
-        if (!userId) {
-          return sendJson(res, 400, { error: 'user_id_required', requestId });
+        const parsedLogin = loginSchema.safeParse(body || {});
+        if (!parsedLogin.success) {
+          const validation = buildValidationError(parsedLogin.error);
+          return sendJson(res, validation.statusCode, { ...validation.payload, requestId });
         }
+        const loginInput = parsedLogin.data;
+        const userId = loginInput.userId;
+        const role = loginInput.role || 'viewer';
 
         try {
           const tokens = createLoginTokens({ userId, role, env });
@@ -1556,59 +1628,6 @@ async function resolveEventIdentifier({ eventId, env = process.env, logger = def
   return { resolvedEventId: eventResult.rows[0].id, exists: true, aliasUsed: false };
 }
 
-function parseGuestLimitParam(raw) {
-  if (raw === null) {
-    return { value: DEFAULT_GUEST_LIST_LIMIT };
-  }
-
-  const numeric = Number(raw);
-  if (!Number.isFinite(numeric)) {
-    return { error: 'invalid_limit' };
-  }
-
-  const truncated = Math.floor(numeric);
-  if (truncated <= 0) {
-    return { error: 'invalid_limit' };
-  }
-
-  return { value: Math.min(truncated, MAX_GUEST_LIST_LIMIT) };
-}
-
-function parseGuestOffsetParam(raw) {
-  if (raw === null) {
-    return { value: 0 };
-  }
-
-  const numeric = Number(raw);
-  if (!Number.isFinite(numeric)) {
-    return { error: 'invalid_offset' };
-  }
-
-  const truncated = Math.floor(numeric);
-  if (truncated < 0) {
-    return { error: 'invalid_offset' };
-  }
-
-  return { value: truncated };
-}
-
-function parseGuestStatusParam(raw) {
-  if (raw === null) {
-    return { value: null };
-  }
-
-  const normalized = String(raw).trim().toLowerCase();
-  if (!normalized) {
-    return { value: null };
-  }
-
-  if (!ALLOWED_GUEST_STATUSES.has(normalized)) {
-    return { error: 'invalid_status' };
-  }
-
-  return { value: normalized };
-}
-
 async function fetchGuests({
   eventId,
   limit = DEFAULT_GUEST_LIST_LIMIT,
@@ -1791,3 +1810,80 @@ export const internals = {
   delay,
   getClientFingerprint,
 };
+
+function resolveCorsConfig(env = process.env) {
+  const rawOrigins = String(env.CORS_ALLOWED_ORIGINS || '*')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const allowedOrigins = rawOrigins.length > 0 ? rawOrigins : ['*'];
+  const allowCredentials = parseBoolean(env.CORS_ALLOW_CREDENTIALS, false);
+  const allowHeaders = env.CORS_ALLOWED_HEADERS || 'Content-Type, Authorization, X-Request-Id';
+  const allowMethods = env.CORS_ALLOWED_METHODS || 'GET,POST,PUT,PATCH,DELETE,OPTIONS';
+  const maxAge = Math.max(0, Number(env.CORS_MAX_AGE_SECONDS || 86400));
+  return { allowedOrigins, allowCredentials, allowHeaders, allowMethods, maxAge };
+}
+
+function applySecurityHeaders({ req, res, corsConfig, env }) {
+  const origin = typeof req.headers?.origin === 'string' ? req.headers.origin : '';
+  const resolvedOrigin = resolveAllowedOrigin(origin, corsConfig.allowedOrigins);
+  if (resolvedOrigin) {
+    res.setHeader('Access-Control-Allow-Origin', resolvedOrigin);
+  }
+  if (resolvedOrigin && corsConfig.allowCredentials && resolvedOrigin !== '*') {
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  }
+  res.setHeader('Access-Control-Allow-Methods', corsConfig.allowMethods);
+  res.setHeader('Access-Control-Allow-Headers', corsConfig.allowHeaders);
+  res.setHeader('Access-Control-Max-Age', String(corsConfig.maxAge));
+  appendVaryHeader(res, 'Origin');
+  const hsts = resolveHstsHeader(env);
+  if (hsts) {
+    res.setHeader('Strict-Transport-Security', hsts);
+  }
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+}
+
+function resolveAllowedOrigin(origin, allowedOrigins = []) {
+  if (allowedOrigins.includes('*')) {
+    return '*';
+  }
+  if (!origin) {
+    return null;
+  }
+  return allowedOrigins.includes(origin) ? origin : null;
+}
+
+function appendVaryHeader(res, value) {
+  const current = res.getHeader('Vary');
+  if (!current) {
+    res.setHeader('Vary', value);
+    return;
+  }
+  const normalized = Array.isArray(current) ? current.join(', ') : String(current);
+  const existing = normalized.split(',').map((entry) => entry.trim().toLowerCase());
+  if (!existing.includes(value.toLowerCase())) {
+    res.setHeader('Vary', `${normalized}, ${value}`);
+  }
+}
+
+function resolveHstsHeader(env = process.env) {
+  const maxAge = Math.max(0, Number(env.HSTS_MAX_AGE_SECONDS || 63072000));
+  if (maxAge === 0) {
+    return 'max-age=0';
+  }
+  return `max-age=${maxAge}; includeSubDomains; preload`;
+}
+
+function parseBoolean(value, defaultValue = false) {
+  if (value === undefined || value === null) {
+    return defaultValue;
+  }
+  const normalized = String(value).trim().toLowerCase();
+  if (!normalized) {
+    return defaultValue;
+  }
+  return ['1', 'true', 'yes', 'on'].includes(normalized);
+}

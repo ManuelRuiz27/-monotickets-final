@@ -1,4 +1,4 @@
-import { decodeJwt, getJwtSecret, verifyJwt } from './tokens.js';
+import { decodeJwt, getJwtKeySet, verifyJwt } from './tokens.js';
 import { getJwtClaims } from '../config/jwt.js';
 
 export function authenticateRequest({ headers = {}, env = process.env } = {}) {
@@ -14,17 +14,28 @@ export function authenticateRequest({ headers = {}, env = process.env } = {}) {
   }
 
   try {
-    const secret = getJwtSecret(env);
-    if (!verifyJwt(token, secret)) {
-      throw new Error('invalid_signature');
+    const keySet = getJwtKeySet(env);
+    const nowMs = Date.now();
+    const verification = verifyJwt(token, keySet, { nowMs });
+    if (!verification.valid) {
+      const reason = verification.reason || 'invalid_signature';
+      throw new Error(reason);
     }
 
     const { payload } = decodeJwt(token);
     const claims = getJwtClaims(env);
-    const now = Math.floor(Date.now() / 1000);
+    const now = Math.floor(nowMs / 1000);
 
     if (!payload.exp || payload.exp < now) {
       throw new Error('token_expired');
+    }
+
+    if (verification.key?.expiresAtMs) {
+      const tokenExpiryMs = payload.exp * 1000;
+      const allowedMs = verification.key.expiresAtMs + (keySet.gracePeriodMs ?? 0);
+      if (tokenExpiryMs > allowedMs) {
+        throw new Error('token_expired');
+      }
     }
 
     if (payload.iss !== claims.issuer || payload.aud !== claims.audience) {
