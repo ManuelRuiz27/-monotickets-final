@@ -32,6 +32,8 @@ const queueProcessedCounter = new Map();
 const APP_VERSION = packageJson.version || '0.0.0';
 const APP_BOOT_TIME_MS = Date.now();
 const DEFAULT_GUEST_LIST_LIMIT = 50;
+const MAX_GUEST_LIST_LIMIT = 200;
+const ALLOWED_GUEST_STATUSES = new Set(['pending', 'confirmed', 'scanned']);
 const RATE_LIMIT_WINDOW_SECONDS = Number(process.env.RATE_LIMIT_WINDOW_SECONDS || 60);
 const RATE_LIMIT_SCAN = Number(process.env.RATE_LIMIT_SCAN || 30);
 const RATE_LIMIT_WEBHOOK = Number(process.env.RATE_LIMIT_WEBHOOK || 120);
@@ -849,6 +851,27 @@ export function createServer(options = {}) {
 
       if (method === 'GET' && url.pathname === '/guests') {
         const eventIdParam = url.searchParams.get('eventId');
+        const { value: limit, error: limitError } = parseGuestLimitParam(
+          url.searchParams.get('limit'),
+        );
+        if (limitError) {
+          return sendJson(res, 400, { error: limitError, requestId });
+        }
+
+        const { value: offset, error: offsetError } = parseGuestOffsetParam(
+          url.searchParams.get('offset'),
+        );
+        if (offsetError) {
+          return sendJson(res, 400, { error: offsetError, requestId });
+        }
+
+        const { value: statusFilter, error: statusError } = parseGuestStatusParam(
+          url.searchParams.get('status'),
+        );
+        if (statusError) {
+          return sendJson(res, 400, { error: statusError, requestId });
+        }
+
         if (!allowAnonymousGuestAccess) {
           if (
             !requireAction({
@@ -876,7 +899,9 @@ export function createServer(options = {}) {
         const guestsResult = await withDbClient((client) =>
           fetchGuests({
             eventId: eventIdParam ?? undefined,
-            limit: DEFAULT_GUEST_LIST_LIMIT,
+            limit,
+            offset,
+            status: statusFilter,
             env,
             logger,
             client,
@@ -922,10 +947,33 @@ export function createServer(options = {}) {
           );
         }
         const [, , requestedEventId] = url.pathname.split('/');
+        const { value: limit, error: limitError } = parseGuestLimitParam(
+          url.searchParams.get('limit'),
+        );
+        if (limitError) {
+          return sendJson(res, 400, { error: limitError, requestId });
+        }
+
+        const { value: offset, error: offsetError } = parseGuestOffsetParam(
+          url.searchParams.get('offset'),
+        );
+        if (offsetError) {
+          return sendJson(res, 400, { error: offsetError, requestId });
+        }
+
+        const { value: statusFilter, error: statusError } = parseGuestStatusParam(
+          url.searchParams.get('status'),
+        );
+        if (statusError) {
+          return sendJson(res, 400, { error: statusError, requestId });
+        }
+
         const guestsResult = await withDbClient((client) =>
           fetchGuests({
             eventId: requestedEventId,
-            limit: DEFAULT_GUEST_LIST_LIMIT,
+            limit,
+            offset,
+            status: statusFilter,
             env,
             logger,
             client,
@@ -1612,9 +1660,64 @@ async function resolveEventIdentifier({ eventId, env = process.env, logger = def
   return { resolvedEventId: eventResult.rows[0].id, exists: true, aliasUsed: false };
 }
 
+function parseGuestLimitParam(raw) {
+  if (raw === null) {
+    return { value: DEFAULT_GUEST_LIST_LIMIT };
+  }
+
+  const numeric = Number(raw);
+  if (!Number.isFinite(numeric)) {
+    return { error: 'invalid_limit' };
+  }
+
+  const truncated = Math.floor(numeric);
+  if (truncated <= 0) {
+    return { error: 'invalid_limit' };
+  }
+
+  return { value: Math.min(truncated, MAX_GUEST_LIST_LIMIT) };
+}
+
+function parseGuestOffsetParam(raw) {
+  if (raw === null) {
+    return { value: 0 };
+  }
+
+  const numeric = Number(raw);
+  if (!Number.isFinite(numeric)) {
+    return { error: 'invalid_offset' };
+  }
+
+  const truncated = Math.floor(numeric);
+  if (truncated < 0) {
+    return { error: 'invalid_offset' };
+  }
+
+  return { value: truncated };
+}
+
+function parseGuestStatusParam(raw) {
+  if (raw === null) {
+    return { value: null };
+  }
+
+  const normalized = String(raw).trim().toLowerCase();
+  if (!normalized) {
+    return { value: null };
+  }
+
+  if (!ALLOWED_GUEST_STATUSES.has(normalized)) {
+    return { error: 'invalid_status' };
+  }
+
+  return { value: normalized };
+}
+
 async function fetchGuests({
   eventId,
   limit = DEFAULT_GUEST_LIST_LIMIT,
+  offset = 0,
+  status = null,
   env = process.env,
   logger = defaultLogger,
   client,
@@ -1634,6 +1737,7 @@ async function fetchGuests({
   }
 
   const params = [];
+  const conditions = [];
   let sql = `
     SELECT id, event_id, name, phone, status, created_at
       FROM guests
@@ -1641,15 +1745,25 @@ async function fetchGuests({
 
   if (resolvedEventId) {
     params.push(resolvedEventId);
-    sql += ' WHERE event_id = $1';
+    conditions.push(`event_id = $${params.length}`);
   }
 
-  sql += ' ORDER BY created_at DESC';
-
-  if (!resolvedEventId) {
-    params.push(limit);
-    sql += ` LIMIT $${params.length}`;
+  if (status) {
+    params.push(status);
+    conditions.push(`status = $${params.length}`);
   }
+
+  if (conditions.length > 0) {
+    sql += ` WHERE ${conditions.join(' AND ')}`;
+  }
+
+  sql += ' ORDER BY created_at DESC, id DESC';
+
+  params.push(limit);
+  sql += ` LIMIT $${params.length}`;
+
+  params.push(offset);
+  sql += ` OFFSET $${params.length}`;
 
   const result = await query(sql, params, { client });
   const guests = result.rows.map((row) => ({
