@@ -37,24 +37,23 @@ export async function initDb(options = {}) {
 }
 
 export async function withTransaction(fn, options = {}) {
-  const client = await getPool(options).connect();
-  try {
-    await client.query('BEGIN');
-    const result = await fn(client);
-    await client.query('COMMIT');
-    return result;
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
+  return withDbClient(async (client) => {
+    try {
+      await client.query('BEGIN');
+      const result = await fn(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    }
+  }, options);
 }
 
 export async function query(textOrConfig, params = [], options = {}) {
-  const client = await getPool(options);
+  const executor = options.client || (await getPool(options));
   if (typeof textOrConfig === 'string') {
-    return client.query(textOrConfig, params);
+    return executor.query(textOrConfig, params);
   }
 
   const config = { ...textOrConfig };
@@ -62,19 +61,44 @@ export async function query(textOrConfig, params = [], options = {}) {
     config.values = params;
   }
 
-  return client.query(config);
+  return executor.query(config);
 }
 
 function buildPoolConfig(env = process.env) {
-  if (env.DATABASE_URL) {
-    return { connectionString: env.DATABASE_URL, max: Number(env.DB_POOL_MAX || 10) };
+  const maxConnections = parsePositiveInt(env.DB_POOL_MAX, 20);
+  const maxUses = parsePositiveInt(env.DB_POOL_MAX_USES, 7500);
+
+  const baseConfig = env.DATABASE_URL
+    ? { connectionString: env.DATABASE_URL }
+    : {
+        host: env.DB_HOST || 'database',
+        port: Number(env.DB_PORT || 5432),
+        user: env.DB_USER || 'postgres',
+        password: env.DB_PASSWORD || 'postgres',
+        database: env.DB_NAME || env.DB_USER || 'postgres',
+      };
+
+  const config = { ...baseConfig, max: maxConnections };
+  if (maxUses > 0) {
+    config.maxUses = maxUses;
   }
-  return {
-    host: env.DB_HOST || 'database',
-    port: Number(env.DB_PORT || 5432),
-    user: env.DB_USER || 'postgres',
-    password: env.DB_PASSWORD || 'postgres',
-    database: env.DB_NAME || env.DB_USER || 'postgres',
-    max: Number(env.DB_POOL_MAX || 10),
-  };
+
+  return config;
+}
+
+export async function withDbClient(fn, options = {}) {
+  const client = await getPool(options).connect();
+  try {
+    return await fn(client);
+  } finally {
+    client.release();
+  }
+}
+
+function parsePositiveInt(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return parsed;
 }

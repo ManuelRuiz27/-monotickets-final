@@ -18,7 +18,7 @@ import { createDeliveryModule } from './modules/delivery.js';
 import { createDirectorModule } from './modules/director.js';
 import { createPaymentsModule } from './modules/payments.js';
 import { createErrorInterceptor } from './http/error-interceptor.js';
-import { query } from './db/index.js';
+import { query, withDbClient } from './db/index.js';
 import { ensureRedis } from './redis/client.js';
 import { hitRateLimit } from './lib/rate-limit.js';
 
@@ -504,7 +504,9 @@ export function createServer(options = {}) {
         }
 
         const filters = Object.fromEntries(url.searchParams.entries());
-        const { statusCode, payload, headers } = await directorModule.getOverviewReport({ filters });
+        const { statusCode, payload, headers } = await withDbClient(async (client) =>
+          directorModule.withDbClient(client).getOverviewReport({ filters }),
+        );
         if (headers) {
           Object.entries(headers).forEach(([key, value]) => {
             res.setHeader(key, value);
@@ -587,7 +589,9 @@ export function createServer(options = {}) {
         }
 
         const filters = Object.fromEntries(url.searchParams.entries());
-        const { statusCode, payload, headers } = await directorModule.getTopOrganizersReport({ filters });
+        const { statusCode, payload, headers } = await withDbClient(async (client) =>
+          directorModule.withDbClient(client).getTopOrganizersReport({ filters }),
+        );
         if (headers) {
           Object.entries(headers).forEach(([key, value]) => {
             res.setHeader(key, value);
@@ -632,7 +636,9 @@ export function createServer(options = {}) {
         }
 
         const filters = Object.fromEntries(url.searchParams.entries());
-        const { statusCode, payload, headers } = await directorModule.getDebtAgingReport({ filters });
+        const { statusCode, payload, headers } = await withDbClient(async (client) =>
+          directorModule.withDbClient(client).getDebtAgingReport({ filters }),
+        );
         if (headers) {
           Object.entries(headers).forEach(([key, value]) => {
             res.setHeader(key, value);
@@ -677,7 +683,9 @@ export function createServer(options = {}) {
         }
 
         const filters = Object.fromEntries(url.searchParams.entries());
-        const { statusCode, payload, headers } = await directorModule.getTicketsUsageReport({ filters });
+        const { statusCode, payload, headers } = await withDbClient(async (client) =>
+          directorModule.withDbClient(client).getTicketsUsageReport({ filters }),
+        );
         if (headers) {
           Object.entries(headers).forEach(([key, value]) => {
             res.setHeader(key, value);
@@ -865,12 +873,15 @@ export function createServer(options = {}) {
             { logger },
           );
         }
-        const guestsResult = await fetchGuests({
-          eventId: eventIdParam ?? undefined,
-          limit: DEFAULT_GUEST_LIST_LIMIT,
-          env,
-          logger,
-        });
+        const guestsResult = await withDbClient((client) =>
+          fetchGuests({
+            eventId: eventIdParam ?? undefined,
+            limit: DEFAULT_GUEST_LIST_LIMIT,
+            env,
+            logger,
+            client,
+          }),
+        );
         if (eventIdParam && !guestsResult.eventExists) {
           return sendJson(res, 404, { error: 'event_not_found', requestId });
         }
@@ -911,12 +922,15 @@ export function createServer(options = {}) {
           );
         }
         const [, , requestedEventId] = url.pathname.split('/');
-        const guestsResult = await fetchGuests({
-          eventId: requestedEventId,
-          limit: DEFAULT_GUEST_LIST_LIMIT,
-          env,
-          logger,
-        });
+        const guestsResult = await withDbClient((client) =>
+          fetchGuests({
+            eventId: requestedEventId,
+            limit: DEFAULT_GUEST_LIST_LIMIT,
+            env,
+            logger,
+            client,
+          }),
+        );
         if (!guestsResult.eventExists) {
           return sendJson(res, 404, { error: 'event_not_found', requestId });
         }
@@ -1535,7 +1549,7 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function resolveEventIdentifier({ eventId, env = process.env, logger = defaultLogger }) {
+async function resolveEventIdentifier({ eventId, env = process.env, logger = defaultLogger, client }) {
   if (!eventId) {
     return { resolvedEventId: undefined, exists: true, aliasUsed: false };
   }
@@ -1558,6 +1572,8 @@ async function resolveEventIdentifier({ eventId, env = process.env, logger = def
         WHERE status = 'active'
         ORDER BY created_at ASC
         LIMIT 1`,
+      [],
+      { client },
     );
 
     if (aliasTarget.rowCount === 0) {
@@ -1566,6 +1582,8 @@ async function resolveEventIdentifier({ eventId, env = process.env, logger = def
            FROM events
           ORDER BY created_at ASC
           LIMIT 1`,
+        [],
+        { client },
       );
     }
 
@@ -1586,7 +1604,7 @@ async function resolveEventIdentifier({ eventId, env = process.env, logger = def
     return { resolvedEventId: resolvedId, exists: true, aliasUsed: true };
   }
 
-  const eventResult = await query('SELECT id FROM events WHERE id = $1 LIMIT 1', [trimmed]);
+  const eventResult = await query('SELECT id FROM events WHERE id = $1 LIMIT 1', [trimmed], { client });
   if (eventResult.rowCount === 0) {
     return { resolvedEventId: null, exists: false, aliasUsed: false };
   }
@@ -1594,13 +1612,19 @@ async function resolveEventIdentifier({ eventId, env = process.env, logger = def
   return { resolvedEventId: eventResult.rows[0].id, exists: true, aliasUsed: false };
 }
 
-async function fetchGuests({ eventId, limit = DEFAULT_GUEST_LIST_LIMIT, env = process.env, logger = defaultLogger }) {
+async function fetchGuests({
+  eventId,
+  limit = DEFAULT_GUEST_LIST_LIMIT,
+  env = process.env,
+  logger = defaultLogger,
+  client,
+}) {
   let eventExists = true;
   let resolvedEventId;
   let aliasUsed = false;
 
   if (eventId) {
-    const resolution = await resolveEventIdentifier({ eventId, env, logger });
+    const resolution = await resolveEventIdentifier({ eventId, env, logger, client });
     resolvedEventId = resolution.resolvedEventId ?? undefined;
     aliasUsed = resolution.aliasUsed;
     if (!resolution.exists) {
@@ -1627,7 +1651,7 @@ async function fetchGuests({ eventId, limit = DEFAULT_GUEST_LIST_LIMIT, env = pr
     sql += ` LIMIT $${params.length}`;
   }
 
-  const result = await query(sql, params);
+  const result = await query(sql, params, { client });
   const guests = result.rows.map((row) => ({
     id: row.id,
     eventId: row.event_id,
