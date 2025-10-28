@@ -2,6 +2,8 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 
 import { query as defaultQuery, withTransaction } from '../db/index.js';
 import { ensureRedis } from '../redis/client.js';
+import { z } from '../lib/zod-lite.js';
+import { buildValidationError } from '../lib/validation.js';
 
 const CACHE_KEY_OVERVIEW = 'director:overview';
 const CACHE_TTL_SECONDS = 45;
@@ -19,6 +21,45 @@ const SORTABLE_COLUMNS = Object.freeze({
   amount: 'assigned_value_cents',
   tickets: 'tickets_equivalent',
 });
+
+const identifierSchema = z.string().trim().min(1);
+const optionalIdentifier = identifierSchema.optional();
+
+const assignTicketsSchema = z
+  .object({
+    organizerId: optionalIdentifier,
+    organizer_id: optionalIdentifier,
+    eventId: optionalIdentifier,
+    event_id: optionalIdentifier,
+    type: z.string().trim().min(1).optional(),
+    tickets: z.number().coerce().int().refine((value) => value > 0, 'invalid_tickets'),
+    price: z.number().coerce().min(0).optional(),
+    currency: z.string().trim().min(1).optional(),
+    metadata: z.record(z.any()).optional(),
+  })
+  .strip();
+
+const recordPaymentSchema = z
+  .object({
+    amount: z.number().coerce().refine((value) => value > 0, 'invalid_amount'),
+    currency: z.string().trim().min(1).optional(),
+    eventId: optionalIdentifier,
+    event_id: optionalIdentifier,
+    organizerId: optionalIdentifier,
+    organizer_id: optionalIdentifier,
+    method: z.string().trim().min(1).optional(),
+    provider: z.string().trim().min(1).optional(),
+    metadata: z.record(z.any()).optional(),
+    ledgerTicketId: optionalIdentifier,
+    ledger_ticket_id: optionalIdentifier,
+    paymentRef: optionalIdentifier,
+    payment_ref: optionalIdentifier,
+    providerRef: optionalIdentifier,
+    note: z.string().trim().min(1).optional(),
+  })
+  .strip();
+
+const directorWebhookBodySchema = z.object({}).strip();
 
 class LedgerPaymentError extends Error {
   constructor(code, statusCode = 400) {
@@ -42,14 +83,20 @@ export function createDirectorModule(options = {}) {
   const query = db.query;
 
   async function assignTickets({ body = {}, requestId }) {
-    const organizerId = normalizeId(body.organizerId || body.organizer_id);
-    const eventId = normalizeId(body.eventId || body.event_id);
-    const type = (body.type || 'prepaid').toLowerCase();
-    const tickets = Number(body.tickets || 0);
-    const price = Number(body.price || 0);
-    const metadata = sanitizeMetadata(body.metadata);
+    const parsed = assignTicketsSchema.safeParse(body || {});
+    if (!parsed.success) {
+      return buildValidationError(parsed.error);
+    }
 
-    if (!organizerId && !ledgerTicketId) {
+    const input = parsed.data;
+    const organizerId = normalizeId(input.organizerId || input.organizer_id);
+    const eventId = normalizeId(input.eventId || input.event_id);
+    const type = (input.type || 'prepaid').toLowerCase();
+    const tickets = Number(input.tickets || 0);
+    const price = Number(input.price || 0);
+    const metadata = sanitizeMetadata(input.metadata);
+
+    if (!organizerId) {
       return { statusCode: 400, payload: { error: 'organizer_id_required' } };
     }
     if (!eventId) {
@@ -87,7 +134,7 @@ export function createDirectorModule(options = {}) {
         equivalentTickets,
         unitPriceCents,
         amountCents,
-        (body.currency || 'mxn').toLowerCase(),
+        (input.currency || 'mxn').toLowerCase(),
         JSON.stringify(metadata || {}),
       ],
     );
@@ -182,15 +229,21 @@ export function createDirectorModule(options = {}) {
 
 
   async function recordPayment({ body = {}, requestId }) {
-    const amount = Number(body.amount || 0);
-    const currency = (body.currency || 'mxn').toLowerCase();
-    const eventId = normalizeId(body.eventId || body.event_id);
-    const organizerId = normalizeId(body.organizerId || body.organizer_id);
-    const method = normalizePaymentMethod(body.method || body.provider || 'manual');
-    const metadata = sanitizeMetadata(body.metadata) || {};
-    const ledgerTicketId = normalizeId(body.ledgerTicketId || body.ledger_ticket_id);
-    const paymentRef = normalizeId(body.paymentRef || body.providerRef || body.payment_ref);
-    const note = typeof body.note === 'string' ? body.note : undefined;
+    const parsed = recordPaymentSchema.safeParse(body || {});
+    if (!parsed.success) {
+      return buildValidationError(parsed.error);
+    }
+
+    const input = parsed.data;
+    const amount = Number(input.amount || 0);
+    const currency = (input.currency || 'mxn').toLowerCase();
+    const eventId = normalizeId(input.eventId || input.event_id);
+    const organizerId = normalizeId(input.organizerId || input.organizer_id);
+    const method = normalizePaymentMethod(input.method || input.provider || 'manual');
+    const metadata = sanitizeMetadata(input.metadata) || {};
+    const ledgerTicketId = normalizeId(input.ledgerTicketId || input.ledger_ticket_id);
+    const paymentRef = normalizeId(input.paymentRef || input.providerRef || input.payment_ref);
+    const note = typeof input.note === 'string' ? input.note : undefined;
 
     if (!organizerId) {
       return { statusCode: 400, payload: { error: 'organizer_id_required' } };
@@ -416,14 +469,22 @@ export function createDirectorModule(options = {}) {
 
 
   async function handleWebhook({ body = {}, headers = {}, rawBody = '', requestId }) {
+    const parsed = directorWebhookBodySchema.safeParse(body || {});
+    if (!parsed.success) {
+      return buildValidationError(parsed.error);
+    }
+
+    const normalizedBody = parsed.data;
+
     const headerMap = normalizeHeaders(headers);
-    const provider = detectWebhookProvider(headerMap, body);
+    const provider = detectWebhookProvider(headerMap, normalizedBody);
 
     if (!provider) {
       return { statusCode: 400, payload: { error: 'unknown_provider' } };
     }
 
-    const payloadString = typeof rawBody === 'string' && rawBody.length > 0 ? rawBody : JSON.stringify(body || {});
+    const payloadString =
+      typeof rawBody === 'string' && rawBody.length > 0 ? rawBody : JSON.stringify(normalizedBody || {});
 
     if (provider === 'stripe') {
       const secret = env.STRIPE_WEBHOOK_SECRET;
@@ -448,7 +509,7 @@ export function createDirectorModule(options = {}) {
 
     let event;
     try {
-      event = provider === 'stripe' ? extractStripePayment(body) : extractConektaPayment(body);
+      event = provider === 'stripe' ? extractStripePayment(normalizedBody) : extractConektaPayment(normalizedBody);
     } catch (error) {
       log({ level: 'error', message: 'director_webhook_parse_failed', provider, error: error.message, request_id: requestId });
       return { statusCode: 400, payload: { error: 'invalid_payload' } };
