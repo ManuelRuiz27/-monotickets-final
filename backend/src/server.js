@@ -46,6 +46,18 @@ const RATE_LIMIT_DIRECTOR_REPORT_OVERVIEW = Number(process.env.RATE_LIMIT_DIRECT
 const RATE_LIMIT_DIRECTOR_REPORT_TOP = Number(process.env.RATE_LIMIT_DIRECTOR_REPORT_TOP || 30);
 const RATE_LIMIT_DIRECTOR_REPORT_DEBT = Number(process.env.RATE_LIMIT_DIRECTOR_REPORT_DEBT || 30);
 const RATE_LIMIT_DIRECTOR_REPORT_USAGE = Number(process.env.RATE_LIMIT_DIRECTOR_REPORT_USAGE || 30);
+const MIN_SCAN_VALID_CACHE_TTL_SECONDS = 60;
+const MAX_SCAN_VALID_CACHE_TTL_SECONDS = 300;
+const DEFAULT_SCAN_VALID_CACHE_TTL_SECONDS = 180;
+
+const SCAN_VALIDATE_INVITE_QUERY = {
+  name: 'scan_validate_invite_v1',
+  text: `SELECT invites.id AS invite_id, invites.guest_id, guests.status, guests.event_id
+           FROM invites
+           JOIN guests ON guests.id = invites.guest_id
+          WHERE invites.code = $1 AND invites.event_id = $2
+          LIMIT 1`,
+};
 
 function observeHttpDuration({ method, route, status, durationMs }) {
   const key = `${method.toUpperCase()}::${status}::${route}`;
@@ -175,6 +187,7 @@ export function createServer(options = {}) {
   const allowAnonymousGuestAccess = !['1', 'true', 'yes', 'on'].includes(guestsRequireAuthFlag);
   const scanRequireAuthFlag = String(env.SCAN_REQUIRE_AUTH || '').toLowerCase();
   const requireScanAuth = ['1', 'true', 'yes', 'on'].includes(scanRequireAuthFlag);
+  const scanValidCacheTtlSeconds = resolveScanValidCacheTtlSeconds(env);
 
   attachQueueObservers(queuesPromise, logger, env);
 
@@ -1044,6 +1057,40 @@ export function createServer(options = {}) {
           }
         }
 
+        const validCacheKey = `scan:valid:${resolvedEventId}:${code}`;
+        let cachedScannedInvite;
+        try {
+          const cachedRaw = await redis.get(validCacheKey);
+          if (cachedRaw) {
+            cachedScannedInvite = JSON.parse(cachedRaw);
+          }
+        } catch (error) {
+          log({ level: 'warn', message: 'scan_valid_cache_read_failed', error: error.message }, { logger });
+        }
+
+        if (cachedScannedInvite?.response) {
+          if (cachedScannedInvite.guestId) {
+            await appendScanLog({
+              eventId: resolvedEventId,
+              guestId: cachedScannedInvite.guestId,
+              result: 'duplicate',
+              device: body.device,
+            });
+          }
+          const responseBody = { ...cachedScannedInvite.response, requestId };
+          if (idempotencyCacheKey) {
+            await cacheIdempotentResponse({
+              redis,
+              key: idempotencyCacheKey,
+              statusCode: 200,
+              body: responseBody,
+              env,
+              logger,
+            });
+          }
+          return sendJson(res, 200, responseBody);
+        }
+
         const lockToken = randomUUID();
         const lockKey = `scan:lock:${resolvedEventId}:${code}`;
         const lockTtlMs = Number(env.SCAN_LOCK_TTL_MS || 1500);
@@ -1064,14 +1111,7 @@ export function createServer(options = {}) {
         }
 
         try {
-          const inviteResult = await query(
-            `SELECT invites.id AS invite_id, invites.guest_id, guests.status, guests.event_id
-               FROM invites
-               JOIN guests ON guests.id = invites.guest_id
-              WHERE invites.code = $1 AND invites.event_id = $2
-              LIMIT 1`,
-            [code, resolvedEventId],
-          );
+          const inviteResult = await query(SCAN_VALIDATE_INVITE_QUERY, [code, resolvedEventId]);
 
           if (inviteResult.rowCount === 0) {
             await appendScanLog({ eventId: resolvedEventId, guestId: null, result: 'invalid', device: body.device });
@@ -1118,6 +1158,13 @@ export function createServer(options = {}) {
               result: 'duplicate',
               device: body.device,
             });
+            await cacheScannedInvite({
+              redis,
+              key: validCacheKey,
+              guestId: invite.guest_id,
+              ttlSeconds: scanValidCacheTtlSeconds,
+              logger,
+            });
             const responseBody = { status: 'duplicate', duplicate: true, requestId };
             if (idempotencyCacheKey) {
               await cacheIdempotentResponse({
@@ -1147,6 +1194,16 @@ export function createServer(options = {}) {
             result: finalStatus === 'valid' ? 'valid' : 'duplicate',
             device: body.device,
           });
+
+          if (finalStatus === 'valid' || finalStatus === 'duplicate') {
+            await cacheScannedInvite({
+              redis,
+              key: validCacheKey,
+              guestId: invite.guest_id,
+              ttlSeconds: scanValidCacheTtlSeconds,
+              logger,
+            });
+          }
 
           const responseBody =
             finalStatus === 'valid'
@@ -1388,6 +1445,30 @@ export function log(payload, { logger = defaultLogger } = {}) {
 function sendJson(res, status, payload) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(payload));
+}
+
+function resolveScanValidCacheTtlSeconds(env = process.env) {
+  const raw = Number(env.SCAN_VALID_CACHE_TTL_SECONDS || DEFAULT_SCAN_VALID_CACHE_TTL_SECONDS);
+  if (!Number.isFinite(raw) || raw <= 0) {
+    return DEFAULT_SCAN_VALID_CACHE_TTL_SECONDS;
+  }
+  const normalized = Math.round(raw);
+  return Math.min(Math.max(normalized, MIN_SCAN_VALID_CACHE_TTL_SECONDS), MAX_SCAN_VALID_CACHE_TTL_SECONDS);
+}
+
+async function cacheScannedInvite({ redis, key, guestId, ttlSeconds, logger }) {
+  if (!redis || !key || !guestId) {
+    return;
+  }
+
+  const ttl = Math.max(1, Math.floor(ttlSeconds));
+  const payload = { guestId, response: { status: 'duplicate', duplicate: true } };
+
+  try {
+    await redis.set(key, JSON.stringify(payload), 'EX', ttl);
+  } catch (error) {
+    log({ level: 'warn', message: 'scan_valid_cache_write_failed', error: error.message }, { logger });
+  }
 }
 
 async function appendScanLog({ eventId, guestId, result, device }) {
