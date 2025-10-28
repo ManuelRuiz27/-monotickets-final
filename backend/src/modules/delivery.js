@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { query } from '../db/index.js';
 import { ensureRedis } from '../redis/client.js';
 import { normalizePhone, normalizeWhatsappPhone } from '../lib/phone.js';
+import { z } from '../lib/zod-lite.js';
+import { buildValidationError } from '../lib/validation.js';
 import { normalizeDeliveryPayload } from './delivery-templates.js';
 import {
   cacheDeliveryStatus,
@@ -18,6 +20,48 @@ const DEFAULT_DEDUPE_WINDOW_MINUTES = 1440;
 const DEDUPE_PREFIX = 'delivery:dedupe';
 const SIGNATURE_HEADER_KEYS = ['x-wa-signature', 'x-360dialog-signature', 'x-hub-signature'];
 
+const stringIdentifier = z.string().trim().min(1);
+const optionalStringIdentifier = stringIdentifier.optional();
+const metadataSchema = z.record(z.any()).optional();
+
+const guestReferenceSchema = z
+  .object({
+    id: optionalStringIdentifier,
+    phone: z.string().trim().min(1).optional(),
+    waId: z.string().trim().min(1).optional(),
+  })
+  .strip();
+
+const deliverSendSchema = z
+  .object({
+    eventId: optionalStringIdentifier,
+    event_id: optionalStringIdentifier,
+    organizerId: optionalStringIdentifier,
+    organizer_id: optionalStringIdentifier,
+    channel: z.string().trim().min(1).optional(),
+    template: z.string().trim().min(1).optional(),
+    payload: z.record(z.any()).optional(),
+    metadata: metadataSchema,
+    guestIds: z.array(stringIdentifier).optional(),
+    guests: z
+      .array(z.union([stringIdentifier, guestReferenceSchema]))
+      .optional(),
+    guestId: optionalStringIdentifier,
+    guest_id: optionalStringIdentifier,
+    phone: z.string().trim().min(1).optional(),
+    phones: z.array(z.string().trim().min(1)).optional(),
+  })
+  .strip();
+
+const webhookBodySchema = z.object({}).strip();
+
+const deliveryStatusSchema = z
+  .object({
+    deliveryId: z.string().trim().min(1).optional(),
+    providerRef: z.string().trim().min(1).optional(),
+  })
+  .strip();
+
 export function createDeliveryModule(options = {}) {
   const { env = process.env, queuesPromise, logger } = options;
   if (!queuesPromise) {
@@ -28,17 +72,26 @@ export function createDeliveryModule(options = {}) {
   const dedupeWindowMinutes = Number(env.DELIVERY_DEDUPE_WINDOW_MIN || DEFAULT_DEDUPE_WINDOW_MINUTES);
 
   async function send({ body = {}, requestId }) {
-    const eventId = normalizeId(body.eventId || body.event_id);
-    const organizerId = normalizeId(body.organizerId || env.DEFAULT_ORGANIZER_ID || DEFAULT_ORGANIZER);
-    const channel = selectChannel(body.channel);
-    const template = typeof body.template === 'string' ? body.template : DEFAULT_TEMPLATE;
-    const payload = typeof body.payload === 'object' && body.payload !== null ? body.payload : {};
+    const parsed = deliverSendSchema.safeParse(body || {});
+    if (!parsed.success) {
+      return buildValidationError(parsed.error);
+    }
+
+    const normalizedBody = normalizeDeliveryRequestBody(parsed.data);
+
+    const eventId = normalizeId(normalizedBody.eventId || normalizedBody.event_id);
+    const organizerId = normalizeId(
+      normalizedBody.organizerId || env.DEFAULT_ORGANIZER_ID || DEFAULT_ORGANIZER,
+    );
+    const channel = selectChannel(normalizedBody.channel);
+    const template = typeof normalizedBody.template === 'string' ? normalizedBody.template : DEFAULT_TEMPLATE;
+    const payload = normalizedBody.payload;
 
     if (!eventId) {
       return { statusCode: 400, payload: { error: 'event_id_required' } };
     }
 
-    const targets = await resolveRecipients({ body, eventId });
+    const targets = await resolveRecipients({ body: normalizedBody, eventId });
 
     if (targets.length === 0) {
       return { statusCode: 400, payload: { error: 'recipient_required' } };
@@ -66,7 +119,7 @@ export function createDeliveryModule(options = {}) {
           template,
           payload,
           requestId,
-          metadata: body.metadata,
+          metadata: normalizedBody.metadata,
         });
         results.push({ ...result, phone: target.phone });
       } catch (error) {
@@ -93,10 +146,19 @@ export function createDeliveryModule(options = {}) {
   }
 
   async function enqueueLegacySend({ eventId, guestId, body = {}, requestId }) {
-    const organizerId = normalizeId(body.organizerId || env.DEFAULT_ORGANIZER_ID || DEFAULT_ORGANIZER);
-    const channel = selectChannel(body.channel);
-    const template = typeof body.template === 'string' ? body.template : DEFAULT_TEMPLATE;
-    const payload = typeof body.payload === 'object' && body.payload !== null ? body.payload : {};
+    const parsed = deliverSendSchema.safeParse(body || {});
+    if (!parsed.success) {
+      return buildValidationError(parsed.error);
+    }
+
+    const normalizedBody = normalizeDeliveryRequestBody(parsed.data);
+
+    const organizerId = normalizeId(
+      normalizedBody.organizerId || env.DEFAULT_ORGANIZER_ID || DEFAULT_ORGANIZER,
+    );
+    const channel = selectChannel(normalizedBody.channel);
+    const template = typeof normalizedBody.template === 'string' ? normalizedBody.template : DEFAULT_TEMPLATE;
+    const payload = normalizedBody.payload;
 
     const result = await enqueueOutbound({
       eventId,
@@ -106,7 +168,7 @@ export function createDeliveryModule(options = {}) {
       template,
       payload,
       requestId,
-      metadata: body.metadata,
+      metadata: normalizedBody.metadata,
     });
 
     return {
@@ -256,6 +318,13 @@ export function createDeliveryModule(options = {}) {
   }
 
   async function enqueueWebhook({ body = {}, headers = {}, requestId }) {
+    const parsed = webhookBodySchema.safeParse(body || {});
+    if (!parsed.success) {
+      return buildValidationError(parsed.error);
+    }
+
+    const normalizedBody = parsed.data;
+
     const secret = env.WA_WEBHOOK_SECRET;
     if (secret) {
       const signature = findSignatureHeader(headers);
@@ -273,7 +342,7 @@ export function createDeliveryModule(options = {}) {
     const inboundQueue = queues.waInboundQueue;
     const jobPayload = {
       webhookId: randomUUID(),
-      payload: body,
+      payload: normalizedBody,
       receivedAt: new Date().toISOString(),
       requestId,
     };
@@ -299,19 +368,31 @@ export function createDeliveryModule(options = {}) {
   }
 
   async function getStatus({ deliveryId, providerRef }) {
-    if (!deliveryId && !providerRef) {
+    const parsed = deliveryStatusSchema.safeParse({ deliveryId, providerRef });
+    if (!parsed.success) {
+      return buildValidationError(parsed.error);
+    }
+
+    const normalizedDeliveryId = parsed.data.deliveryId || null;
+    const normalizedProviderRef = parsed.data.providerRef || null;
+
+    if (!normalizedDeliveryId && !normalizedProviderRef) {
       return { statusCode: 400, payload: { error: 'delivery_id_required' } };
     }
 
-    const numericId = deliveryId && /^\d+$/.test(deliveryId) ? Number(deliveryId) : null;
-    const cacheLookup = await getCachedDeliveryStatus({ requestId: numericId, providerRef, env });
+    const numericId = normalizedDeliveryId && /^\d+$/.test(normalizedDeliveryId) ? Number(normalizedDeliveryId) : null;
+    const cacheLookup = await getCachedDeliveryStatus({
+      requestId: numericId,
+      providerRef: normalizedProviderRef,
+      env,
+    });
     if (cacheLookup.cached) {
       return { statusCode: 200, payload: cacheLookup.cached, headers: { 'x-cache': 'hit' } };
     }
 
     let summary;
-    if (providerRef) {
-      summary = await findDeliverySummaryByProviderRef(providerRef);
+    if (normalizedProviderRef) {
+      summary = await findDeliverySummaryByProviderRef(normalizedProviderRef);
     }
 
     if (!summary && numericId) {
@@ -327,7 +408,7 @@ export function createDeliveryModule(options = {}) {
 
     await cacheDeliveryStatus({
       requestId: summary.requestId,
-      providerRef: summary.latestAttempt?.providerRef || providerRef,
+      providerRef: summary.latestAttempt?.providerRef || normalizedProviderRef,
       summary,
       env,
       ttlSeconds: Number(env.DELIVERY_STATUS_CACHE_TTL_SECONDS || 45),
@@ -450,6 +531,77 @@ function selectQueueForChannel({ queues, channel }) {
     return queues.deliveryQueue;
   }
   throw new Error('delivery_queue_missing');
+}
+
+function normalizeDeliveryRequestBody(raw = {}) {
+  const data = { ...raw };
+  const eventId = typeof data.eventId === 'string' && data.eventId ? data.eventId : data.event_id;
+  const organizerId = typeof data.organizerId === 'string' && data.organizerId ? data.organizerId : data.organizer_id;
+  const guestList = Array.isArray(data.guests) ? data.guests.map((guest) => normalizeGuestEntry(guest)).filter(Boolean) : undefined;
+  const guestIds = mergeUniqueStrings([
+    ...(Array.isArray(data.guestIds) ? data.guestIds : []),
+    data.guestId,
+    data.guest_id,
+  ]);
+  const phones = mergeUniqueStrings([
+    ...(Array.isArray(data.phones) ? data.phones : []),
+    data.phone,
+  ]);
+
+  return {
+    ...data,
+    eventId: typeof eventId === 'string' ? eventId.trim() : undefined,
+    event_id: typeof eventId === 'string' ? eventId.trim() : undefined,
+    organizerId: typeof organizerId === 'string' ? organizerId.trim() : undefined,
+    organizer_id: typeof organizerId === 'string' ? organizerId.trim() : undefined,
+    guests: guestList,
+    guestIds,
+    guestId: guestIds[0],
+    guest_id: guestIds[0],
+    phones,
+    phone: phones[0],
+    payload:
+      data.payload && typeof data.payload === 'object' && !Array.isArray(data.payload) ? data.payload : {},
+    metadata:
+      data.metadata && typeof data.metadata === 'object' && !Array.isArray(data.metadata) ? data.metadata : {},
+  };
+}
+
+function mergeUniqueStrings(values) {
+  const result = [];
+  const seen = new Set();
+  for (const value of values) {
+    if (typeof value !== 'string') continue;
+    const trimmed = value.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    result.push(trimmed);
+  }
+  return result;
+}
+
+function normalizeGuestEntry(entry) {
+  if (typeof entry === 'string') {
+    const trimmed = entry.trim();
+    return trimmed ? trimmed : null;
+  }
+  if (!entry || typeof entry !== 'object') {
+    return null;
+  }
+  const normalized = {};
+  if (typeof entry.id === 'string' && entry.id.trim()) {
+    normalized.id = entry.id.trim();
+  }
+  if (typeof entry.phone === 'string' && entry.phone.trim()) {
+    normalized.phone = entry.phone.trim();
+  }
+  if (typeof entry.waId === 'string' && entry.waId.trim()) {
+    normalized.waId = entry.waId.trim();
+  }
+  if (Object.keys(normalized).length === 0) {
+    return null;
+  }
+  return normalized;
 }
 
 function collectGuestIds(body) {
