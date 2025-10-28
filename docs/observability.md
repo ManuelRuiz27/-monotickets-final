@@ -36,18 +36,19 @@ covers structured logs, metrics, dashboards, and alert recommendations.
   instrumentación de BullMQ para mantener una única superficie de scraping.
 - Histogram name: `http_request_duration_ms` with `_bucket`, `_sum`, `_count`
   series. Buckets follow `[5,10,25,50,100,250,500,1000,2500,5000,+Inf]` ms and
-  include the labels `method`, `route`, `status`.
-- Counter: `http_requests_total{method,route,status}` surfaces total processed
-  requests and enables error-rate ratios.
+  include the labels `service`, `method`, `route`, `status`.
+- Counter: `http_requests_total{service,method,route,status}` surfaces total
+  processed requests and enables error-rate ratios together with
+  `http_requests_5xx_total{service,method,route}`.
 - BullMQ gauges and counters:
-  - `queue_backlog{queue}` reports waiting + delayed jobs for every tracked
+  - `queue_backlog{service,queue}` reports waiting + delayed jobs for every tracked
     queue (`wa_outbound`, `wa_inbound`, `payments`, `email`, `pdf`,
     `delivery_failed`). Values come from `queue_metrics_snapshot` logs emitted
     by API y worker cada `QUEUE_METRICS_INTERVAL_MS` (default 30 s).
-  - `jobs_failed_total{queue}` increases whenever queue processors emit
+  - `jobs_failed_total{service,queue}` increases whenever queue processors emit
     `failed` events (DLQ transitions are logged separately to avoid double
     counting).
-  - `jobs_processed_total{queue}` increments for every successful completion and
+  - `jobs_processed_total{service,queue}` increments for every successful completion and
     enables failure-rate calculations together with `jobs_failed_total`.
 - Suggested Prometheus scrape configuration lives in
   `infra/monitoring/prometheus.example.yml`. Update the targets if the compose
@@ -68,19 +69,19 @@ covers structured logs, metrics, dashboards, and alert recommendations.
 
 Key queries:
 
-- `histogram_quantile(0.95, sum(rate(http_request_duration_ms_bucket{route="/scan/validate"}[5m])) by (le))`
+- `histogram_quantile(0.95, sum(rate(http_request_duration_ms_bucket{service="backend-api",route="/scan/validate"}[5m])) by (le))`
   → p95 latency for QR validation.
-- `histogram_quantile(0.99, sum(rate(http_request_duration_ms_bucket{route=~"/events/.+"}[5m])) by (le, route))`
+- `histogram_quantile(0.99, sum(rate(http_request_duration_ms_bucket{service="backend-api",route=~"/events/.+"}[5m])) by (le, route))`
   → p99 latency for events APIs.
-- `sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m]))`
+- `sum(rate(http_requests_5xx_total{service="backend-api"}[5m])) / sum(rate(http_requests_total{service="backend-api"}[5m]))`
   → aggregate HTTP error rate.
-- `queue_backlog{queue=~"wa_outbound|wa_inbound|payments"}` → current backlog
+- `queue_backlog{service="backend-api",queue=~"wa_outbound|wa_inbound|payments"}` → current backlog
   for messaging and payment workers.
-- `sum(rate(jobs_failed_total{queue=~"wa_outbound|wa_inbound|payments"}[15m]))`
+- `sum(rate(jobs_failed_total{service="backend-api",queue=~"wa_outbound|wa_inbound|payments"}[15m]))`
   → failure throughput per queue.
-- `sum(increase(jobs_failed_total{queue=~"wa_outbound|wa_inbound|payments"}[15m])) /
-   clamp_min(sum(increase(jobs_processed_total{queue=~"wa_outbound|wa_inbound|payments"}[15m])) +
-   sum(increase(jobs_failed_total{queue=~"wa_outbound|wa_inbound|payments"}[15m])), 1)` → queue
+- `sum(increase(jobs_failed_total{service="backend-api",queue=~"wa_outbound|wa_inbound|payments"}[15m])) /
+   clamp_min(sum(increase(jobs_processed_total{service="backend-api",queue=~"wa_outbound|wa_inbound|payments"}[15m])) +
+   sum(increase(jobs_failed_total{service="backend-api",queue=~"wa_outbound|wa_inbound|payments"}[15m])), 1)` → queue
   failure ratio.
 
 ### Scraping instructions
@@ -117,7 +118,7 @@ When integrating Alertmanager or equivalent, use the following baseline rules:
 ```yaml
 # p95 latency above 300 ms for 5 minutes
 a- latency_high:
-    expr: histogram_quantile(0.95, sum(rate(http_request_duration_ms_bucket[5m])) by (le, route)) > 0.3
+    expr: histogram_quantile(0.95, sum(rate(http_request_duration_ms_bucket{service="backend-api"}[5m])) by (le, route)) > 0.3
     for: 5m
     labels:
       severity: warning
@@ -127,7 +128,7 @@ a- latency_high:
 
 # HTTP error rate > 2% across all endpoints
 a- error_rate_high:
-    expr: sum(rate(http_requests_total{status=~"5.."}[10m])) / sum(rate(http_requests_total[10m])) > 0.02
+    expr: sum(rate(http_requests_5xx_total{service="backend-api"}[10m])) / sum(rate(http_requests_total{service="backend-api"}[10m])) > 0.02
     for: 10m
     labels:
       severity: critical
@@ -136,7 +137,7 @@ a- error_rate_high:
 
 # Queue backlog above 100 jobs for 10 minutes
 a- queue_backlog_high:
-    expr: max(queue_backlog{queue=~"wa_outbound|wa_inbound|payments"}) > 100
+    expr: max(sum by (queue) (queue_backlog{service="backend-api",queue=~"wa_outbound|wa_inbound|payments"})) > 100
     for: 10m
     labels:
       severity: warning
@@ -146,9 +147,9 @@ a- queue_backlog_high:
 
 # Queue failure ratio > 1% over 15 minutes
 a- queue_failure_ratio_high:
-    expr: sum(increase(jobs_failed_total{queue=~"wa_outbound|wa_inbound|payments"}[15m])) /
-      clamp_min(sum(increase(jobs_processed_total{queue=~"wa_outbound|wa_inbound|payments"}[15m])) +
-      sum(increase(jobs_failed_total{queue=~"wa_outbound|wa_inbound|payments"}[15m])), 1) > 0.01
+    expr: sum(increase(jobs_failed_total{service="backend-api",queue=~"wa_outbound|wa_inbound|payments"}[15m])) /
+      clamp_min(sum(increase(jobs_processed_total{service="backend-api",queue=~"wa_outbound|wa_inbound|payments"}[15m])) +
+      sum(increase(jobs_failed_total{service="backend-api",queue=~"wa_outbound|wa_inbound|payments"}[15m])), 1) > 0.01
     for: 15m
     labels:
       severity: critical

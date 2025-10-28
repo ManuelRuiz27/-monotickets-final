@@ -64,7 +64,8 @@ const SCAN_VALIDATE_INVITE_QUERY = {
 
 export function createServer(options = {}) {
   const { env = process.env } = options;
-  const logger = options.logger || createLogger({ env, service: env.SERVICE_NAME || 'backend-api' });
+  const serviceName = env.SERVICE_NAME || 'backend-api';
+  const logger = options.logger || createLogger({ env, service: serviceName });
   const correlationHeader = String(env.CORRELATION_HEADER || 'X-Request-Id');
   const correlationHeaderLower = correlationHeader.toLowerCase();
   const queuesPromise = createQueues({ env, logger }).catch((error) => {
@@ -84,7 +85,7 @@ export function createServer(options = {}) {
   const requireScanAuth = ['1', 'true', 'yes', 'on'].includes(scanRequireAuthFlag);
   const scanValidCacheTtlSeconds = resolveScanValidCacheTtlSeconds(env);
 
-  attachQueueObservers(queuesPromise, logger, env);
+  attachQueueObservers(queuesPromise, logger, env, serviceName);
 
   return http.createServer(async (req, res) => {
     const startedAt = process.hrtime.bigint();
@@ -1235,6 +1236,7 @@ export function createServer(options = {}) {
       const finishedAt = process.hrtime.bigint();
       const latencyMs = Number(finishedAt - startedAt) / 1_000_000;
       observeHttpDuration({
+        service: serviceName,
         method,
         route: url.pathname,
         status: String(res.statusCode),
@@ -1261,7 +1263,7 @@ export function createServer(options = {}) {
   });
 }
 
-function attachQueueObservers(queuesPromise, logger, env) {
+function attachQueueObservers(queuesPromise, logger, env, serviceName) {
   queuesPromise
     .then((queues) => {
       const watchers = [
@@ -1276,7 +1278,7 @@ function attachQueueObservers(queuesPromise, logger, env) {
       watchers.forEach(({ label, events }) => {
         if (!events) return;
         events.on('failed', ({ jobId, job }) => {
-          incrementQueueFailures(label);
+          incrementQueueFailures(label, { service: serviceName });
           log(
             {
               level: 'warn',
@@ -1289,7 +1291,7 @@ function attachQueueObservers(queuesPromise, logger, env) {
           );
         });
         events.on('completed', ({ jobId, job }) => {
-          incrementQueueProcessed(label);
+          incrementQueueProcessed(label, { service: serviceName });
           log(
             {
               level: 'info',
@@ -1329,7 +1331,7 @@ function attachQueueObservers(queuesPromise, logger, env) {
                 active: await queue.countActive(),
               })),
           );
-          updateQueueBacklog(snapshot);
+          updateQueueBacklog(snapshot, { service: serviceName });
           log({ level: 'info', message: 'queue_metrics_snapshot', queues: snapshot }, { logger });
         } catch (error) {
           log({ level: 'error', message: 'queue_metrics_error', error: error.message }, { logger });

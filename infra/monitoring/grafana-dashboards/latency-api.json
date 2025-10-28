@@ -4,20 +4,41 @@
     "title": "Monotickets API Latency",
     "timezone": "browser",
     "schemaVersion": 38,
-    "version": 1,
+    "version": 2,
     "editable": true,
+    "templating": {
+      "list": [
+        {
+          "name": "service",
+          "type": "query",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PROMETHEUS_DS"
+          },
+          "definition": "label_values(http_requests_total, service)",
+          "refresh": 1,
+          "includeAll": true,
+          "allValue": ".*",
+          "current": {
+            "selected": true,
+            "text": "All",
+            "value": ".*"
+          }
+        }
+      ]
+    },
     "panels": [
       {
         "type": "timeseries",
-        "title": "p95 latency by path",
+        "title": "p95 latency by route",
         "datasource": {
           "type": "prometheus",
           "uid": "PROMETHEUS_DS"
         },
         "targets": [
           {
-            "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_ms_bucket[$__interval])) by (le, path))",
-            "legendFormat": "{{path}}"
+            "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_ms_bucket{service=~\"$service\"}[$__interval])) by (le, route))",
+            "legendFormat": "{{route}}"
           }
         ],
         "fieldConfig": {
@@ -36,7 +57,7 @@
         },
         "targets": [
           {
-            "expr": "sum(rate(http_request_duration_ms_count{status=~\"5..\"}[5m])) / sum(rate(http_request_duration_ms_count[5m]))",
+            "expr": "sum(rate(http_requests_5xx_total{service=~\"$service\"}[5m])) / sum(rate(http_requests_total{service=~\"$service\"}[5m]))",
             "legendFormat": "5xx"
           }
         ],
@@ -64,7 +85,7 @@
         },
         "targets": [
           {
-            "expr": "queue_backlog{queue=~\"wa_outbound|wa_inbound|payments\"}",
+            "expr": "queue_backlog{service=~\"$service\",queue=~\"wa_outbound|wa_inbound|payments\"}",
             "legendFormat": "{{queue}}"
           }
         ],
@@ -92,7 +113,7 @@
         },
         "targets": [
           {
-            "expr": "increase(jobs_failed_total{queue=~\"wa_outbound|wa_inbound|payments\"}[5m])",
+            "expr": "increase(jobs_failed_total{service=~\"$service\",queue=~\"wa_outbound|wa_inbound|payments\"}[5m])",
             "legendFormat": "{{queue}}"
           }
         ],

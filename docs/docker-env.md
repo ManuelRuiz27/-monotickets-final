@@ -87,7 +87,7 @@ Override browser-facing values using `.env.local` (for Next.js in future phases)
 ## Logs estructurados y métricas
 
 - Si defines `LOG_FORMAT=json`, tanto el backend como los workers emitirán a `stdout` eventos JSON con los campos `ts`, `level`, `service`, `req_id`, `path`, `status` y `latency_ms` cuando aplique.
-- El backend expone `GET /metrics` con las series `http_request_duration_ms_bucket`, `http_request_duration_ms_sum` y `http_request_duration_ms_count`, siguiendo el formato Prometheus. Mantén el endpoint habilitado únicamente en redes privadas.
+- El backend expone `GET /metrics` con las series `http_request_duration_ms_bucket`, `http_request_duration_ms_sum` y `http_request_duration_ms_count` (etiquetas `service`, `method`, `route`, `status`), además de los contadores `http_requests_total` y `http_requests_5xx_total` para monitorear errores. Mantén el endpoint habilitado únicamente en redes privadas.
 - Para correlacionar peticiones, la cabecera `x-request-id` se propaga a las respuestas y a los logs; en `/scan/validate` se añade `event_id` al registro final cuando está presente en la carga útil.
 
 ## Trabajos en segundo plano
