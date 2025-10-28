@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
-import { query, withTransaction } from '../db/index.js';
+import { query as defaultQuery, withTransaction } from '../db/index.js';
 import { ensureRedis } from '../redis/client.js';
 
 const CACHE_KEY_OVERVIEW = 'director:overview';
@@ -34,10 +34,12 @@ export function createDirectorModule(options = {}) {
   const log = logger || ((payload) => console.log(JSON.stringify(payload)));
   const premiumFactor = Math.max(1, Number(env.TICKET_PREMIUM_FACTOR || DEFAULT_PREMIUM_FACTOR));
   const db = {
-    query: options.db?.query || ((text, params) => query(text, params)),
+    query:
+      options.db?.query || ((text, params, queryOptions) => defaultQuery(text, params, queryOptions)),
     withTransaction:
       options.db?.withTransaction || ((fn) => withTransaction((client) => fn({ query: client.query.bind(client) }))),
   };
+  const query = db.query;
 
   async function assignTickets({ body = {}, requestId }) {
     const organizerId = normalizeId(body.organizerId || body.organizer_id);
@@ -535,7 +537,7 @@ export function createDirectorModule(options = {}) {
       cacheKey,
       loader: async () => ({
         meta: buildMeta(normalized, { page: 1, pageSize: 1 }),
-        data: await loadOverviewReportMetrics(normalized),
+        data: await loadOverviewReportMetrics(normalized, { query }),
       }),
       ttlSeconds: ttl,
       skipCache,
@@ -562,6 +564,7 @@ export function createDirectorModule(options = {}) {
           pageSize,
           sortAlias,
           dir: direction,
+          query,
         }),
       ttlSeconds: ttl,
       skipCache,
@@ -577,7 +580,7 @@ export function createDirectorModule(options = {}) {
     const ttl = Number(env.DIRECTOR_REPORT_CACHE_TTL_SECONDS || REPORT_CACHE_TTL_SECONDS);
     const { payload, headers } = await loadReportWithCache({
       cacheKey,
-      loader: async () => loadDebtAgingData(normalized),
+      loader: async () => loadDebtAgingData(normalized, { query }),
       ttlSeconds: ttl,
       skipCache,
       prewarm,
@@ -601,6 +604,7 @@ export function createDirectorModule(options = {}) {
           pageSize: normalized.pageSize,
           sortAlias,
           dir: direction,
+          query,
         }),
       ttlSeconds: ttl,
       skipCache,
@@ -614,6 +618,18 @@ export function createDirectorModule(options = {}) {
     return recordPayment(options);
   }
 
+  function withDbClient(client) {
+    if (!client || typeof client.query !== 'function') {
+      throw new TypeError('A valid database client is required');
+    }
+    const boundDb = {
+      query: (text, params, queryOptions = {}) =>
+        db.query(text, params, { ...queryOptions, client }),
+      withTransaction: (fn) => fn({ query: client.query.bind(client) }),
+    };
+    return createDirectorModule({ ...options, db: boundDb, logger });
+  }
+
   return {
     assignTickets,
     getOrganizerLedger,
@@ -625,6 +641,7 @@ export function createDirectorModule(options = {}) {
     getTopOrganizersReport,
     getDebtAgingReport,
     getTicketsUsageReport,
+    withDbClient,
   };
 }
 
@@ -646,7 +663,7 @@ function sanitizeMetadata(metadata) {
   }
 }
 
-async function loadEvent(eventId, runQuery = query) {
+async function loadEvent(eventId, runQuery = defaultQuery) {
   const result = await runQuery('SELECT id, type FROM events WHERE id = $1', [eventId]);
   return result.rows[0] || null;
 }
@@ -672,7 +689,7 @@ function normalizePaymentMethod(method) {
   return normalized;
 }
 
-async function loadLedgerSummary(organizerId, runQuery = query) {
+async function loadLedgerSummary(organizerId, runQuery = defaultQuery) {
   const result = await runQuery(
     `SELECT
         COALESCE(SUM(CASE WHEN entry_type IN ('assign_prepaid', 'assign_loan') THEN tickets_equivalent ELSE 0 END), 0) AS tickets_equivalent,
@@ -1140,9 +1157,10 @@ function buildDebtQuery(filters, alias = 'lt') {
   };
 }
 
-async function loadOverviewReportMetrics(filters) {
+async function loadOverviewReportMetrics(filters, options = {}) {
+  const runQuery = options.query || defaultQuery;
   const assignmentsFilter = buildAssignmentsQuery(filters, 'dle');
-  const assignments = await query(
+  const assignments = await runQuery(
     `SELECT
         COALESCE(SUM(dle.tickets_equivalent), 0) AS tickets_equivalent,
         COALESCE(SUM(dle.amount_cents), 0) AS assigned_amount_cents,
@@ -1154,7 +1172,7 @@ async function loadOverviewReportMetrics(filters) {
   );
 
   const paymentsFilter = buildPaymentsQuery(filters, 'dle');
-  const payments = await query(
+  const payments = await runQuery(
     `SELECT COALESCE(SUM(dle.amount_cents), 0) AS amount_cents
        FROM director_ledger_entries dle
       ${paymentsFilter.joinClause}
@@ -1163,7 +1181,7 @@ async function loadOverviewReportMetrics(filters) {
   );
 
   const debtFilter = buildDebtQuery(filters, 'lt');
-  const debt = await query(
+  const debt = await runQuery(
     `SELECT COALESCE(SUM(lt.amount_due)::numeric, 0) AS amount_due
        FROM ledger_tickets lt
       ${debtFilter.joinClause}
@@ -1171,8 +1189,8 @@ async function loadOverviewReportMetrics(filters) {
     debtFilter.params,
   );
 
-  const guests = await loadGuestStatusBreakdown(filters);
-  const deliveries = await loadDeliveryStatusBreakdown(filters);
+  const guests = await loadGuestStatusBreakdown(filters, options);
+  const deliveries = await loadDeliveryStatusBreakdown(filters, options);
 
   const metrics = [
     {
@@ -1207,7 +1225,8 @@ async function loadOverviewReportMetrics(filters) {
   return metrics;
 }
 
-async function loadGuestStatusBreakdown(filters) {
+async function loadGuestStatusBreakdown(filters, options = {}) {
+  const runQuery = options.query || defaultQuery;
   const conditions = [];
   const params = [];
   let index = 1;
@@ -1233,7 +1252,7 @@ async function loadGuestStatusBreakdown(filters) {
   }
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-  const result = await query(
+  const result = await runQuery(
     `SELECT status, COUNT(*)::bigint AS total FROM guests ${whereClause} GROUP BY status`,
     params,
   );
@@ -1245,7 +1264,8 @@ async function loadGuestStatusBreakdown(filters) {
     .map((status) => ({ status, count: counts.get(status) }));
 }
 
-async function loadDeliveryStatusBreakdown(filters) {
+async function loadDeliveryStatusBreakdown(filters, options = {}) {
+  const runQuery = options.query || defaultQuery;
   const conditions = [];
   const params = [];
   let index = 1;
@@ -1277,7 +1297,7 @@ async function loadDeliveryStatusBreakdown(filters) {
   }
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-  const result = await query(
+  const result = await runQuery(
     `SELECT dl.status, COUNT(*)::bigint AS total
        FROM delivery_logs dl
        JOIN delivery_requests dr ON dr.id = dl.request_id
@@ -1293,11 +1313,12 @@ async function loadDeliveryStatusBreakdown(filters) {
     .map((status) => ({ status, count: counts.get(status) }));
 }
 
-async function loadTopOrganizersData({ filters, page, pageSize, sortAlias, dir }) {
+async function loadTopOrganizersData({ filters, page, pageSize, sortAlias, dir, query: providedQuery }) {
+  const runQuery = providedQuery || defaultQuery;
   const offset = (page - 1) * pageSize;
   const assignmentsFilter = buildAssignmentsQuery(filters, 'dle');
 
-  const totalResult = await query(
+  const totalResult = await runQuery(
     `SELECT COUNT(DISTINCT dle.organizer_id) AS total
        FROM director_ledger_entries dle
       ${assignmentsFilter.joinClause}
@@ -1305,7 +1326,7 @@ async function loadTopOrganizersData({ filters, page, pageSize, sortAlias, dir }
     assignmentsFilter.params,
   );
 
-  const rows = await query(
+  const rows = await runQuery(
     `SELECT
         dle.organizer_id,
         SUM(dle.tickets_equivalent) AS tickets_equivalent,
@@ -1339,9 +1360,10 @@ async function loadTopOrganizersData({ filters, page, pageSize, sortAlias, dir }
   };
 }
 
-async function loadDebtAgingData(filters) {
+async function loadDebtAgingData(filters, options = {}) {
+  const runQuery = options.query || defaultQuery;
   const debtFilter = buildDebtQuery(filters, 'lt');
-  const result = await query(
+  const result = await runQuery(
     `SELECT bucket, SUM(amount_due)::numeric AS amount_due, COUNT(*)::bigint AS total
        FROM (
          SELECT
@@ -1379,11 +1401,12 @@ async function loadDebtAgingData(filters) {
   };
 }
 
-async function loadTicketsUsageData({ filters, page, pageSize, sortAlias, dir }) {
+async function loadTicketsUsageData({ filters, page, pageSize, sortAlias, dir, query: providedQuery }) {
+  const runQuery = providedQuery || defaultQuery;
   const offset = (page - 1) * pageSize;
   const assignmentsFilter = buildAssignmentsQuery(filters, 'dle', { forceEventJoin: true, eventAlias: 'e' });
 
-  const totalResult = await query(
+  const totalResult = await runQuery(
     `SELECT COUNT(DISTINCT dle.event_id) AS total
        FROM director_ledger_entries dle
       ${assignmentsFilter.joinClause}
@@ -1391,7 +1414,7 @@ async function loadTicketsUsageData({ filters, page, pageSize, sortAlias, dir })
     assignmentsFilter.params,
   );
 
-  const rows = await query(
+  const rows = await runQuery(
     `SELECT
         dle.event_id,
         e.name AS event_name,
