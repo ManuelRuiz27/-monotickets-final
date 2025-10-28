@@ -22,7 +22,7 @@
 
 # Error budget
 - alert: Backend5xxErrorRate
-  expr: sum(rate(http_requests_total{status=~"5.."}[10m])) / sum(rate(http_requests_total[10m])) > 0.02
+  expr: sum(rate(http_requests_5xx_total[10m])) / sum(rate(http_requests_total[10m])) > 0.02
   for: 10m
   labels:
     severity: critical
@@ -32,10 +32,20 @@
 
 # Dead letter queue
 - alert: DeliveryDeadLetterBacklog
-  expr: queue_backlog{queue="delivery"} > 10
+  expr: sum by (queue) (queue_backlog{queue="delivery"}) > 10
   for: 15m
   labels:
     severity: warning
   annotations:
     summary: "Dead letter queue backlog"
     description: "Dead letter queue has {{ $value }} jobs pending. Investigate worker failures."
+
+# Queue failure saturation
+- alert: QueueFailuresSpiking
+  expr: sum by (queue) (increase(jobs_failed_total[15m])) > 10
+  for: 15m
+  labels:
+    severity: warning
+  annotations:
+    summary: "Queue failures rising for {{ $labels.queue }}"
+    description: "More than 10 jobs failed in {{ $labels.queue }} over the last 15 minutes. Investigate worker health."

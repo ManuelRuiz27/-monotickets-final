@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 const HISTOGRAM_BUCKETS = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000];
 const metricsRegistry = new Map();
 const requestTotals = new Map();
+const serverErrorTotals = new Map();
 const queueBacklogGauge = new Map();
 const queueFailuresCounter = new Map();
 const queueProcessedCounter = new Map();
@@ -38,8 +39,14 @@ if (isWorker && typeof process !== 'undefined') {
   });
 }
 
-function applyObserveHttpDuration({ method, route, status, durationMs }) {
-  const key = `${method.toUpperCase()}::${status}::${route}`;
+function resolveServiceLabel(service) {
+  return service || process.env.SERVICE_NAME || 'backend-api';
+}
+
+function applyObserveHttpDuration({ service, method, route, status, durationMs }) {
+  const normalizedService = resolveServiceLabel(service);
+  const normalizedMethod = method.toUpperCase();
+  const key = `${normalizedService}::${normalizedMethod}::${status}::${route}`;
   if (!metricsRegistry.has(key)) {
     metricsRegistry.set(key, {
       count: 0,
@@ -59,30 +66,42 @@ function applyObserveHttpDuration({ method, route, status, durationMs }) {
     metric.buckets[bucketIndex] += 1;
   }
 
-  const totalKey = `${method.toUpperCase()}::${status}::${route}`;
+  const totalKey = `${normalizedService}::${normalizedMethod}::${status}::${route}`;
   const current = requestTotals.get(totalKey) || 0;
   requestTotals.set(totalKey, current + 1);
+
+  if (String(status).startsWith('5')) {
+    const errorKey = `${normalizedService}::${normalizedMethod}::${route}`;
+    const total = serverErrorTotals.get(errorKey) || 0;
+    serverErrorTotals.set(errorKey, total + 1);
+  }
 }
 
-function applyIncrementQueueFailures(queue) {
-  const current = queueFailuresCounter.get(queue) || 0;
-  queueFailuresCounter.set(queue, current + 1);
+function applyIncrementQueueFailures(queue, service) {
+  const normalizedService = resolveServiceLabel(service);
+  const key = `${normalizedService}::${queue}`;
+  const current = queueFailuresCounter.get(key) || 0;
+  queueFailuresCounter.set(key, current + 1);
 }
 
-function applyIncrementQueueProcessed(queue) {
-  const current = queueProcessedCounter.get(queue) || 0;
-  queueProcessedCounter.set(queue, current + 1);
+function applyIncrementQueueProcessed(queue, service) {
+  const normalizedService = resolveServiceLabel(service);
+  const key = `${normalizedService}::${queue}`;
+  const current = queueProcessedCounter.get(key) || 0;
+  queueProcessedCounter.set(key, current + 1);
 }
 
-function applyUpdateQueueBacklog(snapshot = []) {
+function applyUpdateQueueBacklog(snapshot = [], service) {
+  const normalizedService = resolveServiceLabel(service);
   const seen = new Set();
   snapshot.forEach(({ label, waiting = 0, delayed = 0 }) => {
-    seen.add(label);
-    queueBacklogGauge.set(label, Number(waiting || 0) + Number(delayed || 0));
+    const key = `${normalizedService}::${label}`;
+    seen.add(key);
+    queueBacklogGauge.set(key, Number(waiting || 0) + Number(delayed || 0));
   });
-  for (const label of Array.from(queueBacklogGauge.keys())) {
-    if (!seen.has(label)) {
-      queueBacklogGauge.delete(label);
+  for (const key of Array.from(queueBacklogGauge.keys())) {
+    if (key.startsWith(`${normalizedService}::`) && !seen.has(key)) {
+      queueBacklogGauge.delete(key);
     }
   }
 }
@@ -94,21 +113,23 @@ function buildMetricsPayload() {
   ];
 
   for (const [key, metric] of metricsRegistry.entries()) {
-    const [method, status, route] = key.split('::');
+    const [service, method, status, route] = key.split('::');
     let cumulative = 0;
     HISTOGRAM_BUCKETS.forEach((boundary, index) => {
       cumulative += metric.buckets[index];
       lines.push(
-        `http_request_duration_ms_bucket{le="${boundary}",method="${method}",route="${route}",status="${status}"} ${cumulative}`,
+        `http_request_duration_ms_bucket{le="${boundary}",service="${service}",method="${method}",route="${route}",status="${status}"} ${cumulative}`,
       );
     });
     cumulative += metric.buckets[HISTOGRAM_BUCKETS.length];
     lines.push(
-      `http_request_duration_ms_bucket{le="+Inf",method="${method}",route="${route}",status="${status}"} ${cumulative}`,
+      `http_request_duration_ms_bucket{le="+Inf",service="${service}",method="${method}",route="${route}",status="${status}"} ${cumulative}`,
     );
-    lines.push(`http_request_duration_ms_sum{method="${method}",route="${route}",status="${status}"} ${metric.sum}`);
     lines.push(
-      `http_request_duration_ms_count{method="${method}",route="${route}",status="${status}"} ${metric.count}`,
+      `http_request_duration_ms_sum{service="${service}",method="${method}",route="${route}",status="${status}"} ${metric.sum}`,
+    );
+    lines.push(
+      `http_request_duration_ms_count{service="${service}",method="${method}",route="${route}",status="${status}"} ${metric.count}`,
     );
   }
 
@@ -116,32 +137,46 @@ function buildMetricsPayload() {
     lines.push('# HELP http_requests_total Total HTTP requests processed.');
     lines.push('# TYPE http_requests_total counter');
     for (const [key, value] of requestTotals.entries()) {
-      const [method, status, route] = key.split('::');
-      lines.push(`http_requests_total{method="${method}",route="${route}",status="${status}"} ${value}`);
+      const [service, method, status, route] = key.split('::');
+      lines.push(
+        `http_requests_total{service="${service}",method="${method}",route="${route}",status="${status}"} ${value}`,
+      );
+    }
+  }
+
+  if (serverErrorTotals.size > 0) {
+    lines.push('# HELP http_requests_5xx_total Total number of HTTP 5xx responses.');
+    lines.push('# TYPE http_requests_5xx_total counter');
+    for (const [key, value] of serverErrorTotals.entries()) {
+      const [service, method, route] = key.split('::');
+      lines.push(`http_requests_5xx_total{service="${service}",method="${method}",route="${route}"} ${value}`);
     }
   }
 
   if (queueBacklogGauge.size > 0) {
     lines.push('# HELP queue_backlog Pending jobs in queue (waiting + delayed).');
     lines.push('# TYPE queue_backlog gauge');
-    for (const [queue, pending] of queueBacklogGauge.entries()) {
-      lines.push(`queue_backlog{queue="${queue}"} ${pending}`);
+    for (const [key, pending] of queueBacklogGauge.entries()) {
+      const [service, queue] = key.split('::');
+      lines.push(`queue_backlog{service="${service}",queue="${queue}"} ${pending}`);
     }
   }
 
   if (queueFailuresCounter.size > 0) {
     lines.push('# HELP jobs_failed_total Total number of failed queue jobs.');
     lines.push('# TYPE jobs_failed_total counter');
-    for (const [queue, total] of queueFailuresCounter.entries()) {
-      lines.push(`jobs_failed_total{queue="${queue}"} ${total}`);
+    for (const [key, total] of queueFailuresCounter.entries()) {
+      const [service, queue] = key.split('::');
+      lines.push(`jobs_failed_total{service="${service}",queue="${queue}"} ${total}`);
     }
   }
 
   if (queueProcessedCounter.size > 0) {
     lines.push('# HELP jobs_processed_total Total number of completed queue jobs.');
     lines.push('# TYPE jobs_processed_total counter');
-    for (const [queue, total] of queueProcessedCounter.entries()) {
-      lines.push(`jobs_processed_total{queue="${queue}"} ${total}`);
+    for (const [key, total] of queueProcessedCounter.entries()) {
+      const [service, queue] = key.split('::');
+      lines.push(`jobs_processed_total{service="${service}",queue="${queue}"} ${total}`);
     }
   }
 
@@ -184,13 +219,13 @@ export function initializeMasterMetrics() {
         applyObserveHttpDuration(payload);
         break;
       case MESSAGE_TYPES.INCREMENT_QUEUE_FAILURES:
-        applyIncrementQueueFailures(payload.queue);
+        applyIncrementQueueFailures(payload.queue, payload.service);
         break;
       case MESSAGE_TYPES.INCREMENT_QUEUE_PROCESSED:
-        applyIncrementQueueProcessed(payload.queue);
+        applyIncrementQueueProcessed(payload.queue, payload.service);
         break;
       case MESSAGE_TYPES.UPDATE_QUEUE_BACKLOG:
-        applyUpdateQueueBacklog(payload.snapshot);
+        applyUpdateQueueBacklog(payload.snapshot, payload.service);
         break;
       case MESSAGE_TYPES.RENDER: {
         const result = buildMetricsPayload();
@@ -205,9 +240,10 @@ export function initializeMasterMetrics() {
 
 initializeMasterMetrics.initialized = false;
 
-export function observeHttpDuration({ method, route, status, durationMs }) {
-  if (!sendToPrimary(MESSAGE_TYPES.OBSERVE_HTTP_DURATION, { method, route, status, durationMs })) {
-    applyObserveHttpDuration({ method, route, status, durationMs });
+export function observeHttpDuration({ service, method, route, status, durationMs }) {
+  const payload = { service, method, route, status, durationMs };
+  if (!sendToPrimary(MESSAGE_TYPES.OBSERVE_HTTP_DURATION, payload)) {
+    applyObserveHttpDuration(payload);
   }
 }
 
@@ -224,21 +260,24 @@ export async function renderMetrics() {
   }
 }
 
-export function incrementQueueFailures(queue) {
-  if (!sendToPrimary(MESSAGE_TYPES.INCREMENT_QUEUE_FAILURES, { queue })) {
-    applyIncrementQueueFailures(queue);
+export function incrementQueueFailures(queue, options = {}) {
+  const payload = { queue, service: options.service };
+  if (!sendToPrimary(MESSAGE_TYPES.INCREMENT_QUEUE_FAILURES, payload)) {
+    applyIncrementQueueFailures(queue, options.service);
   }
 }
 
-export function incrementQueueProcessed(queue) {
-  if (!sendToPrimary(MESSAGE_TYPES.INCREMENT_QUEUE_PROCESSED, { queue })) {
-    applyIncrementQueueProcessed(queue);
+export function incrementQueueProcessed(queue, options = {}) {
+  const payload = { queue, service: options.service };
+  if (!sendToPrimary(MESSAGE_TYPES.INCREMENT_QUEUE_PROCESSED, payload)) {
+    applyIncrementQueueProcessed(queue, options.service);
   }
 }
 
-export function updateQueueBacklog(snapshot = []) {
-  if (!sendToPrimary(MESSAGE_TYPES.UPDATE_QUEUE_BACKLOG, { snapshot })) {
-    applyUpdateQueueBacklog(snapshot);
+export function updateQueueBacklog(snapshot = [], options = {}) {
+  const payload = { snapshot, service: options.service };
+  if (!sendToPrimary(MESSAGE_TYPES.UPDATE_QUEUE_BACKLOG, payload)) {
+    applyUpdateQueueBacklog(snapshot, options.service);
   }
 }
 
