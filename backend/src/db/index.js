@@ -51,9 +51,18 @@ export async function withTransaction(fn, options = {}) {
   }
 }
 
-export async function query(text, params = [], options = {}) {
+export async function query(textOrConfig, params = [], options = {}) {
   const client = await getPool(options);
-  return client.query(text, params);
+  if (typeof textOrConfig === 'string') {
+    return client.query(textOrConfig, params);
+  }
+
+  const config = { ...textOrConfig };
+  if (!config.values && params.length > 0) {
+    config.values = params;
+  }
+
+  return client.query(config);
 }
 
 function buildPoolConfig(env = process.env) {
